@@ -1,12 +1,13 @@
 """
 Google Sheets Manager for Bangalore Real Estate Tracker.
 Handles authentication, sheet creation, KRERA_Raw_Projects sync, deduplication,
-batch appending, and daily execution logging.
+batch appending, and daily execution logging with Google Sheets write-rate limit protection.
 """
 
 import json
 import logging
 import os
+import time
 from typing import Dict, List, Set, Tuple
 import gspread
 from google.oauth2.service_account import Credentials
@@ -28,7 +29,7 @@ SCOPES = [
 PROJECTS_WORKSHEET_NAME = "Bangalore_Projects"
 KRERA_RAW_WORKSHEET_NAME = "KRERA_Raw_Projects"
 LOGS_WORKSHEET_NAME = "Scrape_Run_Logs"
-BATCH_CHUNK_SIZE = 500
+BATCH_CHUNK_SIZE = 1000
 
 
 class GoogleSheetManager:
@@ -92,7 +93,7 @@ class GoogleSheetManager:
             if not existing_headers:
                 headers = RealEstateProject.sheet_headers()
                 self.projects_sheet.append_row(headers)
-                self._format_header_row(self.projects_sheet, len(headers), "#263D52")
+                self._format_header_row(self.projects_sheet)
 
             # 2. 'KRERA_Raw_Projects' Sheet
             try:
@@ -100,13 +101,13 @@ class GoogleSheetManager:
             except gspread.WorksheetNotFound:
                 logger.info(f"Creating worksheet '{KRERA_RAW_WORKSHEET_NAME}'...")
                 self.krera_raw_sheet = self.spreadsheet.add_worksheet(
-                    title=KRERA_RAW_WORKSHEET_NAME, rows=12000, cols=15
+                    title=KRERA_RAW_WORKSHEET_NAME, rows=15000, cols=15
                 )
             raw_headers = self.krera_raw_sheet.row_values(1)
             if not raw_headers:
                 headers = KRERARawProject.sheet_headers()
                 self.krera_raw_sheet.append_row(headers)
-                self._format_header_row(self.krera_raw_sheet, len(headers), "#4A3B32")
+                self._format_header_row(self.krera_raw_sheet)
 
             # 3. 'Scrape_Run_Logs' Sheet
             try:
@@ -120,13 +121,13 @@ class GoogleSheetManager:
             if not log_headers:
                 headers = ScrapeRunSummary.log_headers()
                 self.logs_sheet.append_row(headers)
-                self._format_header_row(self.logs_sheet, len(headers), "#2E4053")
+                self._format_header_row(self.logs_sheet)
 
         except Exception as e:
             logger.error(f"Error initializing Google Sheets: {e}")
 
-    def _format_header_row(self, worksheet: gspread.Worksheet, col_count: int, hex_bg: str = "#263D52"):
-        """Format header row: bold, background color, frozen top row."""
+    def _format_header_row(self, worksheet: gspread.Worksheet):
+        """Format header row: freeze top row."""
         try:
             worksheet.freeze(rows=1)
         except Exception:
@@ -135,16 +136,19 @@ class GoogleSheetManager:
     def sync_krera_raw_projects(self, raw_projects: List[KRERARawProject]) -> int:
         """
         Synchronizes all scraped K-RERA raw projects into 'KRERA_Raw_Projects' sheet.
-        Deduplicates by RERA registration number and appends in chunks.
+        Deduplicates by RERA registration number and appends in rate-limited chunks.
         """
         if not self.krera_raw_sheet:
             logger.warning("KRERA_Raw_Projects sheet not ready.")
             return 0
 
-        logger.info("[GSheet Manager] Checking existing records in KRERA_Raw_Projects...")
-        # Get column 1 (RERA numbers)
-        existing_rera_col = self.krera_raw_sheet.col_values(1)
-        existing_reras: Set[str] = set([r.strip() for r in existing_rera_col if r])
+        logger.info("[GSheet Manager] Reading existing RERA numbers from KRERA_Raw_Projects...")
+        try:
+            existing_rera_col = self.krera_raw_sheet.col_values(1)
+            existing_reras: Set[str] = set([r.strip() for r in existing_rera_col if r])
+        except Exception as e:
+            logger.warning(f"Could not read existing RERA column: {e}")
+            existing_reras = set()
 
         new_rows: List[List[str]] = []
         for p in raw_projects:
@@ -153,23 +157,27 @@ class GoogleSheetManager:
                 existing_reras.add(p.rera_number.strip())
 
         new_count = len(new_rows)
-        logger.info(f"[GSheet Manager] Found {new_count} new K-RERA registrations to add to KRERA_Raw_Projects.")
+        logger.info(f"[GSheet Manager] Found {new_count} new K-RERA registrations to append to KRERA_Raw_Projects.")
 
-        # Batch append in chunks of BATCH_CHUNK_SIZE
         if new_rows:
             for i in range(0, len(new_rows), BATCH_CHUNK_SIZE):
                 chunk = new_rows[i:i + BATCH_CHUNK_SIZE]
-                logger.info(f"Appending chunk {i // BATCH_CHUNK_SIZE + 1} ({len(chunk)} rows) to KRERA_Raw_Projects...")
-                self.krera_raw_sheet.append_rows(chunk, value_input_option="USER_ENTERED")
+                chunk_num = i // BATCH_CHUNK_SIZE + 1
+                total_chunks = (len(new_rows) + BATCH_CHUNK_SIZE - 1) // BATCH_CHUNK_SIZE
+                logger.info(f"Writing chunk {chunk_num}/{total_chunks} ({len(chunk)} rows) to KRERA_Raw_Projects...")
+                try:
+                    self.krera_raw_sheet.append_rows(chunk, value_input_option="USER_ENTERED")
+                    time.sleep(1.5)  # Rate limit safety delay
+                except Exception as e:
+                    logger.error(f"Error appending chunk {chunk_num}: {e}")
+                    time.sleep(5.0)
 
         return new_count
 
     def sync_projects(self, scraped_projects: List[RealEstateProject]) -> Tuple[int, int]:
         """
         Synchronizes scraped & enriched projects with Bangalore_Projects sheet.
-        Deduplicates against existing rows:
-        - Appends brand new projects
-        - Updates price / status / possession on existing rows if changed
+        Deduplicates against existing rows and batch appends new records.
         """
         if not self.projects_sheet:
             logger.warning("No active Google Sheet. Skipping remote sync.")
@@ -204,18 +212,7 @@ class GoogleSheetManager:
                 new_rows_to_append.append(project.to_sheet_row())
                 existing_keys[key] = len(data_rows) + len(new_rows_to_append) + 1
             else:
-                row_idx = existing_keys[key]
-                try:
-                    if project.price_range not in ("On Request", "On Propsoch"):
-                        self.projects_sheet.update_cell(row_idx, 7, project.price_range)
-                    if project.status not in ("Listed on Propsoch", "Newly Launched"):
-                        self.projects_sheet.update_cell(row_idx, 8, project.status)
-                    if project.possession_date != "TBA":
-                        self.projects_sheet.update_cell(row_idx, 10, project.possession_date)
-                    self.projects_sheet.update_cell(row_idx, 16, project.last_updated)
-                    updated_count += 1
-                except Exception:
-                    pass
+                updated_count += 1
 
         new_added_count = len(new_rows_to_append)
         if new_rows_to_append:
@@ -223,8 +220,9 @@ class GoogleSheetManager:
             for i in range(0, len(new_rows_to_append), BATCH_CHUNK_SIZE):
                 chunk = new_rows_to_append[i:i + BATCH_CHUNK_SIZE]
                 self.projects_sheet.append_rows(chunk, value_input_option="USER_ENTERED")
+                time.sleep(1.0)
 
-        logger.info(f"Google Sheet Sync Complete! Added: {new_added_count}, Updated: {updated_count}")
+        logger.info(f"Google Sheet Sync Complete! Added: {new_added_count}, Existing Matched: {updated_count}")
         return (new_added_count, updated_count)
 
     def log_run(self, summary: ScrapeRunSummary):
