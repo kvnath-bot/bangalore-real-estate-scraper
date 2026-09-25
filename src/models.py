@@ -1,5 +1,5 @@
 """
-Data models for Bangalore Real Estate Project Scraper.
+Data models for Bangalore Real Estate Project Scraper and Karnataka RERA Raw Registry.
 """
 
 from datetime import datetime
@@ -7,8 +7,78 @@ from typing import List, Optional
 from pydantic import BaseModel, Field
 
 
+class KRERARawProject(BaseModel):
+    """Represents a raw project entry scraped directly from Karnataka RERA portal."""
+    rera_number: str = Field(..., description="Official Karnataka RERA registration number")
+    project_name: str = Field(..., description="Project name as registered with K-RERA")
+    promoter_name: str = Field(..., description="Promoter / Developer registered entity name")
+    ack_number: str = Field(default="", description="Application / Acknowledgement number")
+    district: str = Field(default="Bengaluru Urban", description="District extracted from RERA code")
+    portal_url: str = Field(default="https://rera.karnataka.gov.in/viewAllProjects?language=en")
+    status: str = Field(default="Approved by K-RERA")
+    discovered_date: str = Field(default_factory=lambda: datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    enrichment_status: str = Field(default="Pending", description="Pending / Enriched & Synced")
+
+    @classmethod
+    def get_district_from_rera(cls, rera_no: str) -> str:
+        """Determines Karnataka district from RERA ID code."""
+        if "/1251/" in rera_no:
+            return "Bengaluru Urban"
+        elif "/1250/" in rera_no:
+            return "Bengaluru Rural"
+        elif "/1265/" in rera_no:
+            return "Ramanagara (BMRDA)"
+        elif "/1248/" in rera_no:
+            return "Tumakuru (Outer Bengaluru)"
+        elif "/1257/" in rera_no:
+            return "Chikkaballapura (North Bengaluru Corridor)"
+        elif "/1254/" in rera_no:
+            return "Kolar"
+        elif "/1261/" in rera_no:
+            return "Mysuru"
+        elif "/1256/" in rera_no:
+            return "Dakshina Kannada / Mangaluru"
+        return "Other Karnataka"
+
+    def is_bangalore_region(self) -> bool:
+        """Returns True if project belongs to Bengaluru metropolitan area."""
+        return self.district in [
+            "Bengaluru Urban",
+            "Bengaluru Rural",
+            "Ramanagara (BMRDA)",
+            "Chikkaballapura (North Bengaluru Corridor)"
+        ]
+
+    def to_sheet_row(self) -> List[str]:
+        return [
+            self.rera_number,
+            self.project_name,
+            self.promoter_name,
+            self.ack_number,
+            self.district,
+            self.portal_url,
+            self.status,
+            self.discovered_date,
+            self.enrichment_status,
+        ]
+
+    @classmethod
+    def sheet_headers(cls) -> List[str]:
+        return [
+            "Karnataka RERA No.",
+            "Registered Project Name",
+            "Promoter / Developer Name",
+            "Application / Ack No.",
+            "District / Region",
+            "RERA Portal URL",
+            "K-RERA Status",
+            "Discovered Date",
+            "Enrichment Status",
+        ]
+
+
 class RealEstateProject(BaseModel):
-    """Represents a single real estate project record."""
+    """Represents an enriched real estate project record for the Bangalore_Projects database."""
     project_name: str = Field(..., description="Official commercial or marketing name of the project")
     builder_name: str = Field(..., description="Promoter / Real Estate Developer name")
     locality: str = Field(..., description="Micro-market or locality in Bangalore (e.g. Whitefield, Sarjapur, Hebbal)")
@@ -22,17 +92,14 @@ class RealEstateProject(BaseModel):
     total_units_or_area: str = Field(default="N/A", description="Total project area in acres or total number of residential units")
     key_amenities: str = Field(default="", description="Key highlights, amenities or landmark proximity")
     source_url: str = Field(default="", description="Official link, RERA portal link, or developer page")
-    source_engine: str = Field(default="AI Search Grounding", description="Scraper engine used (Gemini / Perplexity / K-RERA)")
+    source_engine: str = Field(default="AI Search Grounding", description="Scraper engine used (Gemini / Perplexity / K-RERA / Propsoch / 99Acres)")
     first_discovered: str = Field(default_factory=lambda: datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
     last_updated: str = Field(default_factory=lambda: datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
 
     def deduplication_key(self) -> str:
-        """
-        Unique key to identify duplicates.
-        Prioritizes cleaned RERA number if available, otherwise normalized Project + Builder.
-        """
+        """Unique key to identify duplicates."""
         clean_rera = "".join(filter(str.isalnum, self.rera_number.lower()))
-        if clean_rera and "pending" not in clean_rera and "not" not in clean_rera and len(clean_rera) > 6:
+        if clean_rera and "pending" not in clean_rera and "not" not in clean_rera and "verified" not in clean_rera and len(clean_rera) > 6:
             return f"rera:{clean_rera}"
         
         clean_proj = "".join(filter(str.isalnum, self.project_name.lower()))
@@ -40,7 +107,6 @@ class RealEstateProject(BaseModel):
         return f"name:{clean_proj}|{clean_builder}"
 
     def to_sheet_row(self) -> List[str]:
-        """Convert project to list of string values matching Google Sheet columns."""
         return [
             self.project_name,
             self.builder_name,
@@ -62,7 +128,6 @@ class RealEstateProject(BaseModel):
 
     @classmethod
     def sheet_headers(cls) -> List[str]:
-        """Column headers for Google Sheet."""
         return [
             "Project Name",
             "Builder / Developer",
