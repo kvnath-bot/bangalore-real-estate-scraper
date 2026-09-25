@@ -1,8 +1,10 @@
 # Secrets and Credentials
 .env
-*.json
-!scraped_projects_latest.json
 service_account.json
+
+# Keep Master Datasets & Backups
+!scraped_projects_latest.json
+!src/data/*.json
 
 # Python
 __pycache__/
