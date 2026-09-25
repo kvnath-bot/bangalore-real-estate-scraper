@@ -82,7 +82,7 @@ class KRERAParser:
         # Fallback to Master Registry Snapshot
         if MASTER_REGISTRY_FILE.exists():
             try:
-                with open(MASTER_REGISTRY_FILE, "r", encoding="utf-8") as f:
+                with open(MASTER_REGISTRY_FILE, "r", encoding="utf-8-sig") as f:
                     data = json.load(f)
                     for item in data:
                         projects.append(KRERARawProject(**item))

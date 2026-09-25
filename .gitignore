@@ -1,6 +1,7 @@
 # Secrets and Credentials
 .env
-service_account.json
+service_account*.json
+*.json.json
 
 # Keep Master Datasets & Backups
 !scraped_projects_latest.json
