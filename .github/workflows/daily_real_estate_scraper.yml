@@ -1,0 +1,53 @@
+name: Daily Bangalore Real Estate Scraper
+
+on:
+  # Daily automated trigger at 03:00 UTC (08:30 AM Indian Standard Time)
+  schedule:
+    - cron: '0 3 * * *'
+  
+  # Manual on-demand trigger button in GitHub Actions tab
+  workflow_dispatch:
+    inputs:
+      search_strategy:
+        description: 'AI Search Strategy (hybrid / gemini / perplexity)'
+        required: false
+        default: 'hybrid'
+
+jobs:
+  scrape-and-sync:
+    name: Scrape Bangalore Projects & Sync to GSheet
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Bangalore Real Estate Scraper & Sync
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          PERPLEXITY_API_KEY: ${{ secrets.PERPLEXITY_API_KEY }}
+          GCP_SERVICE_ACCOUNT_KEY: ${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}
+          GOOGLE_SHEET_NAME: ${{ secrets.GOOGLE_SHEET_NAME || 'Bangalore Real Estate Projects Tracker' }}
+          SEARCH_STRATEGY: ${{ github.event.inputs.search_strategy || secrets.SEARCH_STRATEGY || 'hybrid' }}
+        run: |
+          python src/main.py
+
+      - name: Upload Scraped JSON Backup Artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bangalore-real-estate-snapshot-${{ github.run_id }}
+          path: scraped_projects_latest.json
+          retention-days: 14
