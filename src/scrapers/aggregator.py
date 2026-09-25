@@ -1,6 +1,6 @@
 """
 Aggregator and deduplicator for Bangalore real estate scrapers.
-Coordinates Gemini Search, Perplexity Sonar, and K-RERA validation into a unified pipeline.
+Coordinates Gemini Search, Perplexity Sonar, and Direct Web Scraping into a resilient pipeline.
 """
 
 import logging
@@ -12,6 +12,7 @@ from src.config import (
     SEARCH_STRATEGY,
 )
 from src.models import RealEstateProject
+from src.scrapers.direct_scraper import DirectWebScraper
 from src.scrapers.gemini_scraper import GeminiRealEstateScraper
 from src.scrapers.perplexity_scraper import PerplexityRealEstateScraper
 
@@ -22,12 +23,13 @@ class RealEstateAggregator:
     def __init__(self):
         self.gemini_scraper = GeminiRealEstateScraper() if GEMINI_API_KEY else None
         self.perplexity_scraper = PerplexityRealEstateScraper() if PERPLEXITY_API_KEY else None
+        self.direct_scraper = DirectWebScraper()
         self.strategy = SEARCH_STRATEGY
 
     def run_full_scan(self) -> List[RealEstateProject]:
         """
         Runs comprehensive scan across all Bangalore zones.
-        Deduplicates in-memory and merges data attributes.
+        Combines AI and direct web scraping, deduplicates, and merges attributes.
         """
         all_projects: List[RealEstateProject] = []
         logger.info(f"Starting real estate scan with strategy '{self.strategy}' across {len(BANGALORE_ZONES)} zones...")
@@ -40,8 +42,9 @@ class RealEstateAggregator:
             if self.strategy in ("gemini", "hybrid") and self.gemini_scraper:
                 try:
                     gemini_results = self.gemini_scraper.scrape_corridor(zone_name, localities)
-                    logger.info(f"Gemini found {len(gemini_results)} projects in {zone_name}.")
-                    zone_results.extend(gemini_results)
+                    if gemini_results:
+                        logger.info(f"Gemini found {len(gemini_results)} projects in {zone_name}.")
+                        zone_results.extend(gemini_results)
                 except Exception as e:
                     logger.error(f"Gemini scraper failed for {zone_name}: {e}")
 
@@ -49,10 +52,20 @@ class RealEstateAggregator:
             if (self.strategy == "perplexity" or (self.strategy == "hybrid" and len(zone_results) < 4)) and self.perplexity_scraper:
                 try:
                     perplexity_results = self.perplexity_scraper.scrape_corridor(zone_name, localities)
-                    logger.info(f"Perplexity found {len(perplexity_results)} projects in {zone_name}.")
-                    zone_results.extend(perplexity_results)
+                    if perplexity_results:
+                        logger.info(f"Perplexity found {len(perplexity_results)} projects in {zone_name}.")
+                        zone_results.extend(perplexity_results)
                 except Exception as e:
                     logger.error(f"Perplexity scraper failed for {zone_name}: {e}")
+
+            # 3. Direct Web Scraper (Zero-Cost, No API key needed) - runs if AI yielded few results
+            if len(zone_results) < 5:
+                logger.info(f"Supplementing {zone_name} with Direct Zero-Cost Web Scraper...")
+                try:
+                    direct_results = self.direct_scraper.scrape_corridor(zone_name, localities)
+                    zone_results.extend(direct_results)
+                except Exception as e:
+                    logger.error(f"Direct scraper error for {zone_name}: {e}")
 
             all_projects.extend(zone_results)
 
@@ -70,7 +83,6 @@ class RealEstateAggregator:
             if key not in seen:
                 seen[key] = p
             else:
-                # Merge data: keep whichever has more complete information
                 existing = seen[key]
                 if ("pending" in existing.rera_number.lower() or not existing.rera_number) and p.rera_number and "pending" not in p.rera_number.lower():
                     existing.rera_number = p.rera_number
