@@ -217,14 +217,17 @@ class TestKRERARawGeoColumns(unittest.TestCase):
         )
 
     def test_geocode_query_strips_district_annotation(self):
-        raw = self._raw(district="Ramanagara (BMRDA)")
+        # /1265/ IS Ramanagara, so the derived district and the annotation agree.
+        raw = self._raw(rera_number="PRM/KA/RERA/1265/347/PR/230926/008964",
+                        district="Ramanagara (BMRDA)")
         self.assertEqual(
             raw.geocode_query(),
             "Prestige Park Grove, Ramanagara, Karnataka, India",
         )
 
     def test_geocode_query_falls_back_to_bengaluru(self):
-        raw = self._raw(district="Other Karnataka")
+        # An unrecognised district code leaves the district as Other Karnataka.
+        raw = self._raw(rera_number="PRM/KA/RERA/1299/1/PR/1/1", district="Other Karnataka")
         self.assertIn("Bengaluru, Karnataka, India", raw.geocode_query())
 
     def test_map_pin_uses_coordinates_when_available(self):
@@ -741,6 +744,76 @@ class TestGeocoderBackendResponses(unittest.TestCase):
                 g.geocode_address("Genuinely Unknown, Bengaluru")
             self.assertIn("genuinely unknown, bengaluru", g.cache)
             self.assertIsNone(g.cache["genuinely unknown, bengaluru"])
+
+
+class TestDistrictIsDerivedNotTrusted(unittest.TestCase):
+    """
+    The bundled registry stored "Other Karnataka" for all 4,090 /1251/ rows,
+    which are Bengaluru Urban. Trusting that value excluded the largest group of
+    Bangalore projects from enrichment and geocoding entirely.
+    """
+
+    def _raw(self, rera, district):
+        return KRERARawProject(rera_number=rera, project_name="X",
+                               promoter_name="Y", district=district)
+
+    def test_wrong_stored_district_is_overridden(self):
+        raw = self._raw("PRM/KA/RERA/1251/308/PR/250926/008969", "Other Karnataka")
+        self.assertEqual(raw.district, "Bengaluru Urban")
+        self.assertTrue(raw.is_bangalore_region())
+
+    def test_correction_works_in_both_directions(self):
+        raw = self._raw("PRM/KA/RERA/1261/1/PR/1/1", "Bengaluru Urban")
+        self.assertEqual(raw.district, "Mysuru")
+        self.assertFalse(raw.is_bangalore_region())
+
+    def test_unrecognised_code_keeps_the_supplied_district(self):
+        """The caller may know something the registration number does not encode."""
+        raw = self._raw("PRM/KA/RERA/1299/1/PR/1/1", "Hand-set Region")
+        self.assertEqual(raw.district, "Hand-set Region")
+
+    def test_every_known_code_maps_to_its_district(self):
+        cases = {
+            "1251": "Bengaluru Urban", "1250": "Bengaluru Rural",
+            "1265": "Ramanagara (BMRDA)", "1248": "Tumakuru (Outer Bengaluru)",
+            "1257": "Chikkaballapura (North Bengaluru Corridor)", "1254": "Kolar",
+            "1261": "Mysuru", "1256": "Dakshina Kannada / Mangaluru",
+        }
+        for code, expected in cases.items():
+            raw = self._raw(f"PRM/KA/RERA/{code}/1/PR/1/1", "Other Karnataka")
+            self.assertEqual(raw.district, expected, f"code {code}")
+
+    def test_registry_file_agrees_with_the_derivation(self):
+        """The shipped data file must not carry districts the model disagrees with."""
+        import json
+        from pathlib import Path as _Path
+        rows = json.loads(
+            (_Path(__file__).resolve().parent.parent / "src" / "data"
+             / "krera_master_registry.json").read_text(encoding="utf-8-sig")
+        )
+        mismatched = [
+            r["rera_number"] for r in rows
+            if KRERARawProject.get_district_from_rera(r["rera_number"]) != "Other Karnataka"
+            and r.get("district") != KRERARawProject.get_district_from_rera(r["rera_number"])
+        ]
+        self.assertEqual(mismatched[:5], [], f"{len(mismatched)} rows have a stale district")
+
+    def test_registry_bangalore_count(self):
+        """Regression guard on the number this bug silently reduced to 1,424."""
+        import json
+        from pathlib import Path as _Path
+        rows = json.loads(
+            (_Path(__file__).resolve().parent.parent / "src" / "data"
+             / "krera_master_registry.json").read_text(encoding="utf-8-sig")
+        )
+        in_region = sum(
+            1 for r in rows
+            if KRERARawProject(rera_number=r["rera_number"],
+                               project_name=r["project_name"] or "x",
+                               promoter_name="",
+                               district=r["district"]).is_bangalore_region()
+        )
+        self.assertEqual(in_region, 5554)
 
 
 if __name__ == "__main__":

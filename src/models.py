@@ -5,7 +5,7 @@ Data models for Bangalore Real Estate Project Scraper and Karnataka RERA Raw Reg
 from datetime import datetime
 from typing import List, Optional
 from urllib.parse import quote_plus
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class KRERARawProject(BaseModel):
@@ -22,6 +22,27 @@ class KRERARawProject(BaseModel):
     latitude: str = Field(default="", description="Geocoded latitude of the project (blank when unresolved)")
     longitude: str = Field(default="", description="Geocoded longitude of the project (blank when unresolved)")
     map_pin_link: str = Field(default="", description="Google Maps link - a coordinate pin when geocoded, else a name search")
+
+    @model_validator(mode="after")
+    def _derive_district(self):
+        """
+        District is DERIVED from the RERA number, never taken on trust.
+
+        The bundled master registry stores "Other Karnataka" for all 4,090
+        /1251/ registrations, which are Bengaluru Urban - the largest group of
+        Bangalore projects. Because the registry loader passed the stored value
+        straight through, every one of them was treated as out of scope: not
+        enriched, not geocoded, and mislabelled in the sheet. Deriving it here
+        fixes the loader, the sheet writes and the geocoding stage at once.
+
+        A RERA number whose code is not recognised yields "Other Karnataka",
+        and in that case an explicitly supplied district is kept - the caller
+        may know something the registration number does not encode.
+        """
+        derived = self.get_district_from_rera(self.rera_number)
+        if derived != "Other Karnataka" and self.district != derived:
+            object.__setattr__(self, "district", derived)
+        return self
 
     @classmethod
     def get_district_from_rera(cls, rera_no: str) -> str:

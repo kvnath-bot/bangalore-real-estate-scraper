@@ -38,6 +38,9 @@ BATCH_CHUNK_SIZE = 1000
 MAP_COL_START = "J"
 MAP_COL_END = "L"
 
+# Column E of KRERA_Raw_Projects holds District / Region.
+DISTRICT_COL = "E"
+
 
 class GoogleSheetManager:
     def __init__(self):
@@ -327,10 +330,64 @@ class GoogleSheetManager:
     def update_krera_map_columns(self, row_values: Dict[int, List[str]]) -> int:
         """
         Batch writes Latitude / Longitude / Map Pin Link (columns J:L) for the
-        given sheet rows. Contiguous rows are merged into single ranges so a few
-        thousand updates cost only a handful of API calls.
+        given sheet rows.
 
         row_values maps a 1-based sheet row number to [latitude, longitude, link].
+        """
+        return self._write_column_blocks(MAP_COL_START, MAP_COL_END, row_values, "coordinates and map pins")
+
+    def backfill_krera_districts(self) -> int:
+        """
+        Recomputes column E (District / Region) from each row's RERA number and
+        writes back the rows that disagree.
+
+        The bundled registry stored "Other Karnataka" for all 4,090 /1251/
+        registrations, which are Bengaluru Urban, so the sheet inherited that
+        error and those projects were treated as out of scope everywhere.
+        Deriving the district in the model fixes new writes; this repairs rows
+        already in the sheet.
+        """
+        if not self.krera_raw_sheet:
+            return 0
+        try:
+            all_rows = self.krera_raw_sheet.get_all_values()
+        except Exception as e:
+            logger.error(f"Could not read KRERA_Raw_Projects for district backfill: {e}")
+            return 0
+
+        corrections: Dict[int, List[str]] = {}
+        for idx, row in enumerate(all_rows[1:], start=2):
+            if not row or not row[0].strip():
+                continue
+            rera = row[0].strip()
+            current = row[4].strip() if len(row) > 4 else ""
+            derived = KRERARawProject.get_district_from_rera(rera)
+            if derived != "Other Karnataka" and current != derived:
+                corrections[idx] = [derived]
+
+        if not corrections:
+            logger.info("[GSheet Manager] District column is already correct for every row.")
+            return 0
+
+        logger.info(
+            f"[GSheet Manager] Correcting District / Region on {len(corrections)} rows "
+            f"whose value disagrees with their RERA number."
+        )
+        return self._write_column_blocks(
+            DISTRICT_COL, DISTRICT_COL, corrections, "district corrections"
+        )
+
+    def _write_column_blocks(
+        self,
+        col_start: str,
+        col_end: str,
+        row_values: Dict[int, List[str]],
+        what: str,
+    ) -> int:
+        """
+        Writes a span of columns for scattered rows. Contiguous rows are merged
+        into single ranges so a few thousand updates cost only a handful of API
+        calls.
         """
         if not self.krera_raw_sheet or not row_values:
             return 0
@@ -344,7 +401,7 @@ class GoogleSheetManager:
         for row_num, values in ordered:
             if previous_row is not None and row_num != previous_row + 1:
                 requests_payload.append({
-                    "range": f"{MAP_COL_START}{block_start}:{MAP_COL_END}{block_start + len(block) - 1}",
+                    "range": f"{col_start}{block_start}:{col_end}{block_start + len(block) - 1}",
                     "values": block,
                 })
                 block_start = row_num
@@ -354,13 +411,13 @@ class GoogleSheetManager:
 
         if block:
             requests_payload.append({
-                "range": f"{MAP_COL_START}{block_start}:{MAP_COL_END}{block_start + len(block) - 1}",
+                "range": f"{col_start}{block_start}:{col_end}{block_start + len(block) - 1}",
                 "values": block,
             })
 
         written = 0
         logger.info(
-            f"[GSheet Manager] Writing map data for {len(ordered)} rows "
+            f"[GSheet Manager] Writing {what} for {len(ordered)} rows "
             f"in {len(requests_payload)} contiguous range(s)..."
         )
         for i in range(0, len(requests_payload), 100):
@@ -370,10 +427,10 @@ class GoogleSheetManager:
                 written += sum(len(r["values"]) for r in chunk)
                 time.sleep(1.5)
             except Exception as e:
-                logger.error(f"Failed writing map-column batch starting at index {i}: {e}")
+                logger.error(f"Failed writing {what} batch starting at index {i}: {e}")
                 time.sleep(5.0)
 
-        logger.info(f"[GSheet Manager] Wrote coordinates and map pins for {written} rows.")
+        logger.info(f"[GSheet Manager] Wrote {what} for {written} rows.")
         return written
 
     def share_with_emails(
