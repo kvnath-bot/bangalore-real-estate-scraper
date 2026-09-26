@@ -27,6 +27,7 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from src.gsheet_manager import GoogleSheetManager  # noqa: E402
+from src.listing_data import load_listing_rows, type_from_name  # noqa: E402
 from src.models import KRERARawProject  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s",
@@ -40,7 +41,7 @@ def _cell(row: List[str], idx: int) -> str:
     return row[idx].strip() if len(row) > idx and row[idx] else ""
 
 
-def build_geojson(rows: List[List[str]], generated_at: datetime) -> Dict:
+def build_geojson(rows: List[List[str]], generated_at: datetime, listing_rows: List[List[str]] = None) -> Dict:
     """
     Turns KRERA_Raw_Projects rows (header excluded) into a FeatureCollection.
 
@@ -51,6 +52,8 @@ def build_geojson(rows: List[List[str]], generated_at: datetime) -> Dict:
     features = []
     in_region_total = 0
     districts: Dict[str, int] = {}
+    listings = load_listing_rows(listing_rows or [])
+    with_listing = with_price = with_bhk = 0
 
     for row in rows:
         rera = _cell(row, 0)
@@ -78,17 +81,34 @@ def build_geojson(rows: List[List[str]], generated_at: datetime) -> Dict:
             continue
 
         districts[raw.district] = districts.get(raw.district, 0) + 1
+        props = {
+            "name": raw.project_name,
+            "promoter": raw.promoter_name,
+            "district": raw.district,
+            "rera": rera,
+            "link": _cell(row, 11),
+            "status": _cell(row, 12),
+            # Property type: an entered value wins; otherwise a strict guess from
+            # the registered name, which is honestly "Unknown" most of the time.
+            "type": type_from_name(raw.project_name),
+            "type_source": "name",
+        }
+        lst = listings.get(rera)
+        if lst:
+            with_listing += 1
+            if lst["type"] and lst["type"] != "Unknown":
+                props["type"], props["type_source"] = lst["type"], "listing"
+            if lst["bhk"]:
+                props["bhk"] = lst["bhk"]; with_bhk += 1
+            if lst["price_lakh"] is not None:
+                props["price_lakh"] = lst["price_lakh"]; with_price += 1
+            for key in ("bhk_text", "price_text", "possession", "sale_status", "source", "entered_by", "entered_on"):
+                if lst.get(key):
+                    props[key] = lst[key]
         features.append({
             "type": "Feature",
             "geometry": {"type": "Point", "coordinates": [round(lng_f, 6), round(lat_f, 6)]},
-            "properties": {
-                "name": raw.project_name,
-                "promoter": raw.promoter_name,
-                "district": raw.district,
-                "rera": rera,
-                "link": _cell(row, 11),
-                "status": _cell(row, 12),
-            },
+            "properties": props,
         })
 
     return {
@@ -99,6 +119,9 @@ def build_geojson(rows: List[List[str]], generated_at: datetime) -> Dict:
             "in_region_total": in_region_total,
             "unlocated": in_region_total - len(features),
             "districts": districts,
+            "with_listing": with_listing,
+            "with_price": with_price,
+            "with_bhk": with_bhk,
         },
         "features": features,
     }
@@ -115,7 +138,8 @@ def main() -> int:
         return 1
 
     all_rows = gsheet.krera_raw_sheet.get_all_values()
-    collection = build_geojson(all_rows[1:], datetime.now(timezone.utc))
+    listing_rows = gsheet.get_listing_rows()
+    collection = build_geojson(all_rows[1:], datetime.now(timezone.utc), listing_rows)
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(collection, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
@@ -123,7 +147,8 @@ def main() -> int:
     m = collection["meta"]
     logger.info(
         f"Wrote {m['located']} pins to {args.out} "
-        f"({m['unlocated']} of {m['in_region_total']} Bengaluru-region rows still unlocated)."
+        f"({m['unlocated']} of {m['in_region_total']} Bengaluru-region rows still unlocated; "
+        f"{m['with_price']} pins have a price, {m['with_bhk']} have BHK data)."
     )
     return 0
 

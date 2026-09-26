@@ -130,6 +130,14 @@
   .marker-cluster { background: var(--radius-fill); }
   .picking .leaflet-container { cursor: crosshair; }
 
+  .cov { color: var(--muted); font-size: 11px; margin: 4px 0 0; }
+  .chip.type .dot { display: none; }
+  select.sel { width: 100%; padding: 7px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--ground); }
+  .two { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .pop .lst { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--line); font-size: 12px; }
+  .pop .lst b { font-weight: 600; }
+  .pop .lst .src { color: var(--muted); }
+  .tag { display: inline-block; padding: 1px 6px; border-radius: 4px; background: var(--surface-2); font-size: 11px; color: var(--muted); }
   .notice { padding: 12px 16px; background: var(--surface-2); color: var(--muted); font-size: 12px; border-bottom: 1px solid var(--line); }
   .notice b { color: var(--ink); }
   .toggle-side { display: none; }
@@ -166,6 +174,43 @@
     <section>
       <span class="lbl">District</span>
       <div class="chips" id="chips"></div>
+    </section>
+    <section>
+      <span class="lbl">Property type</span>
+      <div class="chips" id="typeChips"></div>
+      <p class="cov" id="typeCov"></p>
+    </section>
+    <section>
+      <span class="lbl">Bedrooms</span>
+      <div class="chips" id="bhkChips"></div>
+      <p class="cov" id="bhkCov"></p>
+    </section>
+    <section>
+      <label class="lbl" for="price">Starting price up to</label>
+      <div class="radius-row">
+        <input type="range" id="price" min="25" max="1000" step="5" value="1000" aria-label="Maximum starting price">
+        <span class="mono" id="priceLabel">any</span>
+      </div>
+      <p class="cov" id="priceCov"></p>
+    </section>
+    <section class="two">
+      <div>
+        <label class="lbl" for="poss">Possession</label>
+        <select class="sel" id="poss">
+          <option value="">Any</option>
+          <option value="ready">Ready to move</option>
+          <option value="uc">Under construction</option>
+        </select>
+      </div>
+      <div>
+        <label class="lbl" for="sale">Sale status</label>
+        <select class="sel" id="sale">
+          <option value="">Any</option>
+          <option value="Available">Available</option>
+          <option value="Sold Out">Sold out</option>
+          <option value="Not Launched">Not launched</option>
+        </select>
+      </div>
     </section>
     <section>
       <span class="lbl">Within a radius</span>
@@ -230,6 +275,11 @@
   var centre = null;       // [lat,lng]
   var radiusKm = 5;
   var centreMarker = null, circle = null, picking = false;
+  var activeTypes = new Set();   // empty = no type filter
+  var activeBhk = new Set();     // empty = no bhk filter
+  var maxPrice = null;           // lakh, null = any
+  var possession = '', sale = '';
+  var TYPE_ORDER = ['Apartment', 'Villa', 'Row House / Townhouse', 'Plots', 'Commercial', 'Unknown'];
 
   var els = {
     stats: document.getElementById('stats'), chips: document.getElementById('chips'),
@@ -238,7 +288,11 @@
     clear: document.getElementById('clearRadius'), radius: document.getElementById('radius'),
     radiusLabel: document.getElementById('radiusLabel'), hint: document.getElementById('radiusHint'),
     side: document.getElementById('side'), toggle: document.getElementById('toggleSide'),
-    reload: document.getElementById('reload')
+    reload: document.getElementById('reload'),
+    typeChips: document.getElementById('typeChips'), typeCov: document.getElementById('typeCov'),
+    bhkChips: document.getElementById('bhkChips'), bhkCov: document.getElementById('bhkCov'),
+    price: document.getElementById('price'), priceLabel: document.getElementById('priceLabel'),
+    priceCov: document.getElementById('priceCov'), poss: document.getElementById('poss'), sale: document.getElementById('sale')
   };
 
   // ---- data ----
@@ -253,13 +307,18 @@
           var p = f.properties || {};
           var c = f.geometry.coordinates;
           var item = { lat: c[1], lng: c[0], name: p.name || '', promoter: p.promoter || '',
-                       district: p.district || '', rera: p.rera || '', link: p.link || '', status: p.status || '' };
+                       district: p.district || '', rera: p.rera || '', link: p.link || '', status: p.status || '',
+                       type: p.type || 'Unknown', typeSource: p.type_source || 'name',
+                       bhk: p.bhk || [], bhkText: p.bhk_text || '', price: (p.price_lakh != null ? p.price_lakh : null),
+                       priceText: p.price_text || '', possession: p.possession || '', sale: p.sale_status || '',
+                       source: p.source || '', enteredBy: p.entered_by || '', enteredOn: p.entered_on || '' };
           item.marker = L.circleMarker([item.lat, item.lng], {
             radius: 6, weight: 1.5, color: '#ffffff', fillColor: districtColor(item.district), fillOpacity: 0.95
           }).bindPopup(popupHtml(item));
           return item;
         });
         buildChips();
+        buildListingChips();
         render();
       })
       .catch(function (e) {
@@ -276,7 +335,72 @@
       '<span class="rera mono">' + esc(it.rera) + '</span>' +
       '<a href="' + esc(mapsLink) + '" target="_blank" rel="noopener">Open in Google Maps</a>' +
       '<div class="meta" style="margin-top:8px">Location confirmed by geocoding' + (it.status ? ' · ' + esc(it.status) : '') + '</div>' +
+      listingHtml(it) +
       '</div>';
+  }
+
+  function fmtPrice(lakh) {
+    if (lakh == null) return '';
+    if (lakh >= 100) { var cr = (lakh / 100).toFixed(2); cr = cr.replace(/0+$/, '').replace(/\.$/, ''); return '\u20B9' + cr + ' Cr'; }
+    return '\u20B9' + lakh.toFixed(0) + ' L';
+  }
+  function listingHtml(it) {
+    var hasAny = it.price != null || it.bhk.length || it.possession || it.sale;
+    if (!hasAny) {
+      return '<div class="lst"><span class="tag">' + esc(it.type) + (it.typeSource === 'name' ? ' (from name)' : '') + '</span>' +
+             ' <span class="src">No price or configuration data yet.</span></div>';
+    }
+    return '<div class="lst">' +
+      '<span class="tag">' + esc(it.type) + '</span> ' +
+      (it.bhk.length ? '<b>' + esc(it.bhkText || it.bhk.join(', ') + ' BHK') + '</b> \u00B7 ' : '') +
+      (it.price != null ? 'from <b>' + fmtPrice(it.price) + '</b>' : '') +
+      (it.possession ? '<br>Possession: ' + esc(it.possession) : '') +
+      (it.sale ? ' \u00B7 ' + esc(it.sale) : '') +
+      '<br><span class="src">' + (it.source ? '<a href="' + esc(it.source) + '" target="_blank" rel="noopener">Source</a> \u00B7 ' : '') +
+      (it.enteredBy ? esc(it.enteredBy) + ' \u00B7 ' : '') + (it.enteredOn ? esc(it.enteredOn) : '') + '</span></div>';
+  }
+
+  function buildListingChips() {
+    var tc = {}, bc = {}, withPrice = 0, withBhk = 0;
+    all.forEach(function (it) {
+      tc[it.type] = (tc[it.type] || 0) + 1;
+      it.bhk.forEach(function (n) { var k = n >= 4 ? '4+' : String(n); bc[k] = (bc[k] || 0) + 1; });
+      if (it.price != null) withPrice++;
+      if (it.bhk.length) withBhk++;
+    });
+    var types = TYPE_ORDER.filter(function (t) { return tc[t]; });
+    els.typeChips.innerHTML = types.map(function (t) {
+      return '<button type="button" class="chip type" data-t="' + esc(t) + '">' + esc(t) + ' <span class="mono">' + tc[t] + '</span></button>';
+    }).join('');
+    Array.prototype.forEach.call(els.typeChips.querySelectorAll('.chip'), function (b) {
+      b.addEventListener('click', function () {
+        var t = b.getAttribute('data-t');
+        if (activeTypes.has(t)) activeTypes.delete(t); else activeTypes.add(t);
+        Array.prototype.forEach.call(els.typeChips.querySelectorAll('.chip'), function (x) {
+          x.classList.toggle('active', activeTypes.has(x.getAttribute('data-t')));
+        });
+        render();
+      });
+    });
+    var known = all.length - (tc['Unknown'] || 0);
+    els.typeCov.textContent = 'Type known for ' + known.toLocaleString() + ' of ' + all.length.toLocaleString() +
+      ' pins; most are read from the registered name. Select none to show all.';
+
+    var bhkKeys = ['1', '2', '3', '4+'];
+    els.bhkChips.innerHTML = bhkKeys.map(function (k) {
+      return '<button type="button" class="chip type" data-b="' + k + '">' + k + ' BHK <span class="mono">' + (bc[k] || 0) + '</span></button>';
+    }).join('');
+    Array.prototype.forEach.call(els.bhkChips.querySelectorAll('.chip'), function (b) {
+      b.addEventListener('click', function () {
+        var k = b.getAttribute('data-b');
+        if (activeBhk.has(k)) activeBhk.delete(k); else activeBhk.add(k);
+        b.classList.toggle('active', activeBhk.has(k));
+        render();
+      });
+    });
+    els.bhkCov.textContent = 'Configuration known for ' + withBhk.toLocaleString() + ' of ' + all.length.toLocaleString() + ' pins.';
+    els.priceCov.textContent = 'Price known for ' + withPrice.toLocaleString() + ' of ' + all.length.toLocaleString() +
+      ' pins. Filtering by price hides pins with no price.';
   }
 
   function buildChips() {
@@ -299,16 +423,38 @@
   }
 
   // ---- filtering + rendering ----
+  var hiddenForNoData = 0;
   function matches(it) {
     if (!activeDistricts.has(it.district)) return false;
     if (query) {
       var hay = (it.name + ' ' + it.promoter + ' ' + it.rera).toLowerCase();
       if (hay.indexOf(query) === -1) return false;
     }
+    if (activeTypes.size && !activeTypes.has(it.type)) return false;
+    if (activeBhk.size) {
+      if (!it.bhk.length) { hiddenForNoData++; return false; }
+      var ok = it.bhk.some(function (n) { return activeBhk.has(n >= 4 ? '4+' : String(n)); });
+      if (!ok) return false;
+    }
+    if (maxPrice != null) {
+      if (it.price == null) { hiddenForNoData++; return false; }
+      if (it.price > maxPrice) return false;
+    }
+    if (possession) {
+      if (!it.possession) { hiddenForNoData++; return false; }
+      var ready = /ready|immediate|completed|occupancy/i.test(it.possession);
+      if (possession === 'ready' && !ready) return false;
+      if (possession === 'uc' && ready) return false;
+    }
+    if (sale) {
+      if (!it.sale) { hiddenForNoData++; return false; }
+      if (it.sale.toLowerCase() !== sale.toLowerCase()) return false;
+    }
     return true;
   }
 
   function render() {
+    hiddenForNoData = 0;
     var visible = all.filter(matches);
     if (centre) {
       visible = visible.map(function (it) { it.dist = haversineKm(centre, [it.lat, it.lng]); return it; })
@@ -331,7 +477,8 @@
 
     var scope = centre ? ('within ' + radiusKm.toFixed(1) + ' km of the chosen point') : 'matching filters';
     els.header.innerHTML = '<span class="mono">' + visible.length.toLocaleString() + '</span> projects ' + esc(scope) +
-      (visible.length > 300 ? ' · showing first 300' : '');
+      (hiddenForNoData ? ' \u00B7 <span title="These pins have no data for an active filter">' + hiddenForNoData.toLocaleString() + ' hidden: no data for that filter</span>' : '') +
+      (visible.length > 300 ? ' \u00B7 showing first 300' : '');
 
     var rows = visible.slice(0, 300);
     if (!rows.length) {
@@ -343,7 +490,7 @@
         '<span class="dot"></span>' +
         '<div><div class="name">' + esc(it.name) + '</div>' +
         '<div class="meta">' + esc(it.promoter) + (it.promoter ? ' · ' : '') + esc(shortDistrict(it.district)) + '</div></div>' +
-        '<span class="dist mono">' + (it.dist != null ? it.dist.toFixed(2) + ' km' : '') + '</span>' +
+        '<span class="dist mono">' + (it.dist != null ? it.dist.toFixed(2) + ' km' : (it.price != null ? fmtPrice(it.price) : '')) + '</span>' +
         '</div>';
     }).join('');
     Array.prototype.forEach.call(els.list.querySelectorAll('.row'), function (row) {
@@ -395,6 +542,16 @@
     els.radiusLabel.textContent = radiusKm.toFixed(1) + ' km';
     if (circle) { circle.setRadius(radiusKm * 1000); render(); }
   });
+
+  // ---- listing filters ----
+  els.price.addEventListener('input', function () {
+    var v = parseFloat(els.price.value);
+    maxPrice = v >= 1000 ? null : v;
+    els.priceLabel.textContent = maxPrice == null ? 'any' : fmtPrice(maxPrice);
+    render();
+  });
+  els.poss.addEventListener('change', function () { possession = els.poss.value; render(); });
+  els.sale.addEventListener('change', function () { sale = els.sale.value; render(); });
 
   // ---- search, layout, reload ----
   var t;
