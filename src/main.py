@@ -123,7 +123,13 @@ def run_geocoding_stage(gsheet: GoogleSheetManager) -> int:
         raw.longitude = longitude
         link = raw.build_map_pin_link()
 
-        row_values[entry["row"]] = [latitude, longitude, link]
+        # Column M records what happened and when, so the next run can put
+        # never-tried rows first and leave fresh failures alone for a while.
+        today = datetime.now().strftime("%Y-%m-%d")
+        status = (f"resolved via {geocoder.backend} {today}" if latitude
+                  else f"unresolved {today}")
+
+        row_values[entry["row"]] = [latitude, longitude, link, status]
 
         # Flush periodically. A run cancelled by the job timeout keeps whatever
         # has already been written, instead of discarding the whole stage.

@@ -72,6 +72,12 @@ GEOCODE_CACHE_FILE = Path(os.getenv("GEOCODE_CACHE_FILE", str(ROOT_DIR / "src" /
 # written, so this matters more than the lookup count.
 GEOCODE_TIME_BUDGET_SECONDS = int(os.getenv("GEOCODE_TIME_BUDGET_SECONDS", "3000"))
 
+# A row the geocoder could not resolve is retried, but not on every run: the
+# free providers all read the same OpenStreetMap data, so asking again tomorrow
+# gets the same answer. Wait this many days before spending a lookup on it
+# again. Never-tried rows always go first regardless.
+GEOCODE_RETRY_COOLDOWN_DAYS = int(os.getenv("GEOCODE_RETRY_COOLDOWN_DAYS", "30"))
+
 # Write coordinates to the sheet every N rows instead of once at the end, so a
 # timeout or crash costs at most this many lookups.
 GEOCODE_FLUSH_EVERY = int(os.getenv("GEOCODE_FLUSH_EVERY", "250"))

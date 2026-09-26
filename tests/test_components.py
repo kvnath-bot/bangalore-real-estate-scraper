@@ -212,8 +212,8 @@ class TestKRERARawGeoColumns(unittest.TestCase):
         row = self._raw().to_sheet_row()
         self.assertEqual(len(row), len(KRERARawProject.sheet_headers()))
         self.assertEqual(
-            KRERARawProject.sheet_headers()[-3:],
-            ["Latitude", "Longitude", "Map Pin Link"],
+            KRERARawProject.sheet_headers()[-4:],
+            ["Latitude", "Longitude", "Map Pin Link", "Geocode Status"],
         )
 
     def test_geocode_query_strips_district_annotation(self):
@@ -324,7 +324,7 @@ class TestMapColumnRangeBatching(unittest.TestCase):
         })
         payload = mgr.krera_raw_sheet.batch_update.call_args[0][0]
         self.assertEqual(len(payload), 1)
-        self.assertEqual(payload[0]["range"], "J2:L4")
+        self.assertEqual(payload[0]["range"], "J2:M4")
         self.assertEqual(written, 3)
 
     def test_gaps_produce_separate_ranges(self):
@@ -335,7 +335,7 @@ class TestMapColumnRangeBatching(unittest.TestCase):
             9: ["12.9", "77.9", "l9"],
         })
         payload = mgr.krera_raw_sheet.batch_update.call_args[0][0]
-        self.assertEqual([r["range"] for r in payload], ["J2:L3", "J9:L9"])
+        self.assertEqual([r["range"] for r in payload], ["J2:M3", "J9:M9"])
 
     def test_empty_input_makes_no_api_call(self):
         mgr = self._manager()
@@ -1084,6 +1084,122 @@ class TestGeocodeAny(unittest.TestCase):
             g._lookup_locationiq = lambda addr: calls.append(addr)
             self.assertIsNone(g.geocode_any(["A, Bengaluru", "B, Bengaluru", "C, Bengaluru"]))
             self.assertEqual(calls, [])
+
+
+class TestGeocodeQueueOrdering(unittest.TestCase):
+    """
+    A 60-lookup test run resolved 0 of 60 because the pending list was in
+    sheet order and the top rows were this morning's known misses. Never-tried
+    rows must go first, and fresh failures must wait out a cooldown.
+    """
+
+    def _manager(self, rows):
+        from src.gsheet_manager import GoogleSheetManager
+        mgr = GoogleSheetManager.__new__(GoogleSheetManager)
+        mgr.krera_raw_sheet = mock.MagicMock()
+        mgr.krera_raw_sheet.get_all_values.return_value = [KRERARawProject.sheet_headers()] + rows
+        return mgr
+
+    def _row(self, rera, lat="", lng="", link="", status=""):
+        return [rera, f"Project {rera}", "P", "", "Bengaluru Urban", "u", "Approved",
+                "d", "Pending", lat, lng, link, status]
+
+    def test_never_tried_rows_come_before_known_misses(self):
+        from datetime import datetime, timedelta
+        old = (datetime.now() - timedelta(days=90)).strftime("%Y-%m-%d")
+        mgr = self._manager([
+            self._row("R1", link="search-link", status=f"unresolved {old}"),   # tried long ago
+            self._row("R2"),                                                    # never tried
+            self._row("R3", link="search-link"),                                # legacy: link, no status
+            self._row("R4"),                                                    # never tried
+        ])
+        order = [e["rera_number"] for e in mgr.get_krera_rows_needing_coordinates()]
+        self.assertEqual(order[:2], ["R2", "R4"], "never-tried rows must lead")
+        self.assertEqual(set(order[2:]), {"R1", "R3"})
+
+    def test_recent_failures_are_deferred(self):
+        from datetime import datetime, timedelta
+        recent = (datetime.now() - timedelta(days=3)).strftime("%Y-%m-%d")
+        stale = (datetime.now() - timedelta(days=45)).strftime("%Y-%m-%d")
+        mgr = self._manager([
+            self._row("R1", link="l", status=f"unresolved {recent}"),
+            self._row("R2", link="l", status=f"unresolved {stale}"),
+            self._row("R3"),
+        ])
+        reras = [e["rera_number"] for e in mgr.get_krera_rows_needing_coordinates()]
+        self.assertNotIn("R1", reras, "a failure 3 days old must not be retried yet")
+        self.assertIn("R2", reras)
+        self.assertEqual(reras[0], "R3")
+
+    def test_stalest_failure_is_retried_first_among_retries(self):
+        from datetime import datetime, timedelta
+        d = lambda days: (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+        mgr = self._manager([
+            self._row("R1", link="l", status=f"unresolved {d(40)}"),
+            self._row("R2", link="l", status=f"unresolved {d(200)}"),
+            self._row("R3", link="l", status=f"unresolved {d(70)}"),
+        ])
+        reras = [e["rera_number"] for e in mgr.get_krera_rows_needing_coordinates()]
+        self.assertEqual(reras, ["R2", "R3", "R1"])
+
+    def test_legacy_link_only_row_counts_as_tried_but_eligible(self):
+        """Rows written before column M existed: tried, date unknown, retry once."""
+        mgr = self._manager([self._row("R1", link="search-link"), self._row("R2")])
+        entries = mgr.get_krera_rows_needing_coordinates()
+        by = {e["rera_number"]: e for e in entries}
+        self.assertTrue(by["R1"]["tried"])
+        self.assertEqual(by["R1"]["attempted_on"], "")
+        self.assertFalse(by["R2"]["tried"])
+        self.assertEqual([e["rera_number"] for e in entries], ["R2", "R1"])
+
+    def test_resolved_rows_are_never_queued(self):
+        mgr = self._manager([
+            self._row("R1", lat="12.9", lng="77.7", link="pin", status="resolved via locationiq 2026-09-26"),
+            self._row("R2"),
+        ])
+        self.assertEqual([e["rera_number"] for e in mgr.get_krera_rows_needing_coordinates()], ["R2"])
+
+    def test_unparseable_status_is_treated_as_tried_and_eligible(self):
+        mgr = self._manager([self._row("R1", link="l", status="unresolved (date missing)"),
+                             self._row("R2")])
+        reras = [e["rera_number"] for e in mgr.get_krera_rows_needing_coordinates()]
+        self.assertEqual(reras, ["R2", "R1"])
+
+
+class TestGeocodeStatusStamp(unittest.TestCase):
+    """The stage writes four columns, with a dated status the next run can read."""
+
+    def test_stage_stamps_resolved_and_unresolved(self):
+        from src.gsheet_manager import GoogleSheetManager
+        import src.main as main
+        rows = [KRERARawProject.sheet_headers(),
+                ["PRM/KA/RERA/1251/1/PR/1/1", "Hit Project", "P", "", "Bengaluru Urban"] + [""] * 8,
+                ["PRM/KA/RERA/1251/2/PR/1/2", "Miss Project", "P", "", "Bengaluru Urban"] + [""] * 8]
+        mgr = GoogleSheetManager.__new__(GoogleSheetManager)
+        mgr.krera_raw_sheet = mock.MagicMock()
+        mgr.krera_raw_sheet.get_all_values.return_value = rows
+        mgr.backfill_krera_districts = lambda: 0
+
+        captured = {}
+        def spy(self_, rv):
+            captured.update(rv); return len(rv)
+        def fake(self_, addr):
+            return (12.94, 77.74) if "hit project" in addr.lower() else None
+
+        with mock.patch.object(GoogleSheetManager, "update_krera_map_columns", spy), \
+             mock.patch("src.geocoder.resolve_backend", lambda: "locationiq"), \
+             mock.patch.object(main.Geocoder, "_lookup_locationiq", fake), \
+             mock.patch.object(main.Geocoder, "save_cache", lambda s_: None), \
+             mock.patch("src.geocoder.time.sleep", lambda s_: None):
+            main.run_geocoding_stage(mgr)
+
+        hit, miss = captured[2], captured[3]
+        self.assertEqual(len(hit), 4)
+        self.assertTrue(hit[3].startswith("resolved via locationiq 20"), hit[3])
+        self.assertEqual(hit[0], "12.940000")
+        self.assertTrue(miss[3].startswith("unresolved 20"), miss[3])
+        self.assertEqual((miss[0], miss[1]), ("", ""))
+        self.assertIn("query=Miss+Project", miss[2])
 
 
 if __name__ == "__main__":
