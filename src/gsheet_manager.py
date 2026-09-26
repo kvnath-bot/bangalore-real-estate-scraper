@@ -32,6 +32,7 @@ SCOPES = [
 PROJECTS_WORKSHEET_NAME = "Bangalore_Projects"
 KRERA_RAW_WORKSHEET_NAME = "KRERA_Raw_Projects"
 LOGS_WORKSHEET_NAME = "Scrape_Run_Logs"
+MAP_PINS_WORKSHEET_NAME = "Map_Pins"
 BATCH_CHUNK_SIZE = 1000
 
 # Columns J, K, L of KRERA_Raw_Projects hold Latitude / Longitude / Map Pin Link.
@@ -432,6 +433,69 @@ class GoogleSheetManager:
 
         logger.info(f"[GSheet Manager] Wrote {what} for {written} rows.")
         return written
+
+    def export_map_pins(self) -> int:
+        """
+        Rebuilds the 'Map_Pins' worksheet: one row per project that has REAL
+        coordinates, ready to import straight into Google My Maps.
+
+        This is the sharing surface for agents. KRERA_Raw_Projects holds all
+        8,943 registrations, most of them unresolved or out of scope, which is
+        not something anyone can usefully import. Map_Pins holds only the
+        located ones, so "Import -> Latitude/Longitude" just works.
+
+        Rows without coordinates are deliberately EXCLUDED rather than exported
+        with a name-search link. A pin that is not a real location has no place
+        on a map.
+        """
+        if not self.krera_raw_sheet or not self.spreadsheet:
+            return 0
+        try:
+            all_rows = self.krera_raw_sheet.get_all_values()
+        except Exception as e:
+            logger.error(f"Could not read KRERA_Raw_Projects for map pin export: {e}")
+            return 0
+
+        headers = [
+            "Project Name", "Promoter / Developer", "District / Region",
+            "Latitude", "Longitude", "Karnataka RERA No.", "Map Pin Link",
+        ]
+        pins: List[List[str]] = []
+        for row in all_rows[1:]:
+            if not row or not row[0].strip():
+                continue
+            latitude = row[9].strip() if len(row) > 9 else ""
+            longitude = row[10].strip() if len(row) > 10 else ""
+            if not latitude or not longitude:
+                continue
+            pins.append([
+                row[1].strip() if len(row) > 1 else "",
+                row[2].strip() if len(row) > 2 else "",
+                row[4].strip() if len(row) > 4 else "",
+                latitude,
+                longitude,
+                row[0].strip(),
+                row[11].strip() if len(row) > 11 else "",
+            ])
+
+        if not pins:
+            logger.info("[GSheet Manager] No located projects yet; Map_Pins not written.")
+            return 0
+
+        try:
+            sheet = self.spreadsheet.worksheet(MAP_PINS_WORKSHEET_NAME)
+            sheet.clear()
+        except gspread.WorksheetNotFound:
+            logger.info(f"Creating worksheet '{MAP_PINS_WORKSHEET_NAME}'...")
+            sheet = self.spreadsheet.add_worksheet(
+                title=MAP_PINS_WORKSHEET_NAME, rows=max(1000, len(pins) + 50), cols=10
+            )
+
+        logger.info(f"[GSheet Manager] Writing {len(pins)} located projects to '{MAP_PINS_WORKSHEET_NAME}'...")
+        sheet.update(range_name="A1", values=[headers] + pins, value_input_option="USER_ENTERED")
+        self._format_header_row(sheet)
+        logger.info(f"[GSheet Manager] Map_Pins refreshed with {len(pins)} pins.")
+        return len(pins)
 
     def share_with_emails(
         self,

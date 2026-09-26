@@ -51,6 +51,7 @@ jobs:
           LOCATIONIQ_API_KEY: ${{ secrets.LOCATIONIQ_API_KEY }}
           GEOAPIFY_API_KEY: ${{ secrets.GEOAPIFY_API_KEY }}
           GOOGLE_MAPS_API_KEY: ${{ secrets.GOOGLE_MAPS_API_KEY }}
+          GOOGLE_PLACES_FALLBACK: ${{ vars.GOOGLE_PLACES_FALLBACK || 'true' }}
           # Sheet sharing: comma-separated Gmail / Workspace addresses.
           SHARE_WITH_EMAILS: ${{ secrets.SHARE_WITH_EMAILS }}
           SHARE_ROLE: ${{ vars.SHARE_ROLE || 'writer' }}

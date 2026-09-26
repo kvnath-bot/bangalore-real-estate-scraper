@@ -816,5 +816,162 @@ class TestDistrictIsDerivedNotTrusted(unittest.TestCase):
         self.assertEqual(in_region, 5554)
 
 
+class TestGooglePlacesFallback(unittest.TestCase):
+    """
+    Geocoding resolves addresses; a project name is a POI. Places is what finds
+    the villa communities that scored 0 of 10 on address geocoding.
+    """
+
+    def _geocoder(self, tmp):
+        from src import geocoder
+        g = geocoder.Geocoder(cache_file=Path(tmp) / "c.json", backend="google")
+        g.delay = 0
+        return g
+
+    def _resp(self, payload, status=200):
+        r = mock.MagicMock()
+        r.status_code = status
+        r.json.return_value = payload
+        return r
+
+    GEO_MISS = {"status": "ZERO_RESULTS"}
+    GEO_HIT = {"status": "OK", "results": [{"geometry": {"location": {"lat": 12.94, "lng": 77.74}}}]}
+    PLACES_HIT = {"status": "OK", "results": [{"geometry": {"location": {"lat": 12.86, "lng": 77.53}}}]}
+
+    def test_places_rescues_a_geocoding_miss(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            g = self._geocoder(tmp)
+            with mock.patch("src.geocoder.requests.get",
+                            side_effect=[self._resp(self.GEO_MISS), self._resp(self.PLACES_HIT)]) as get:
+                self.assertEqual(g.geocode_address("KRK Urban Ville, Gunjur, Bengaluru"),
+                                 (12.86, 77.53))
+            self.assertEqual(get.call_count, 2)
+            self.assertIn("place/textsearch", get.call_args[0][0])
+            self.assertEqual((g.places_calls, g.places_hits), (1, 1))
+
+    def test_places_is_not_called_when_geocoding_succeeds(self):
+        """Places costs more, so it must only run on misses."""
+        with tempfile.TemporaryDirectory() as tmp:
+            g = self._geocoder(tmp)
+            with mock.patch("src.geocoder.requests.get",
+                            return_value=self._resp(self.GEO_HIT)) as get:
+                self.assertEqual(g.geocode_address("Prestige Park Grove, Bengaluru"),
+                                 (12.94, 77.74))
+            self.assertEqual(get.call_count, 1)
+            self.assertEqual(g.places_calls, 0)
+
+    def test_places_can_be_disabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            g = self._geocoder(tmp)
+            with mock.patch("src.geocoder.GOOGLE_PLACES_FALLBACK", False), \
+                 mock.patch("src.geocoder.requests.get",
+                            return_value=self._resp(self.GEO_MISS)) as get:
+                self.assertIsNone(g.geocode_address("Nowhere, Bengaluru"))
+            self.assertEqual(get.call_count, 1)
+            self.assertEqual(g.places_calls, 0)
+
+    def test_places_miss_is_a_normal_miss(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            g = self._geocoder(tmp)
+            with mock.patch("src.geocoder.requests.get",
+                            side_effect=[self._resp(self.GEO_MISS), self._resp({"status": "ZERO_RESULTS"})]):
+                self.assertIsNone(g.geocode_address("Genuinely Unknown, Bengaluru"))
+            self.assertEqual(g.misses, 1)
+            self.assertFalse(g.aborted)
+            self.assertEqual((g.places_calls, g.places_hits), (1, 0))
+
+    def test_places_api_not_enabled_aborts_once(self):
+        """Places disabled on the key is a config error, not a per-row miss."""
+        with tempfile.TemporaryDirectory() as tmp:
+            g = self._geocoder(tmp)
+            denied = {"status": "REQUEST_DENIED",
+                      "error_message": "This API project is not authorized to use this API."}
+            with mock.patch("src.geocoder.requests.get",
+                            side_effect=[self._resp(self.GEO_MISS), self._resp(denied)]) as get:
+                self.assertIsNone(g.geocode_address("One, Bengaluru"))
+                self.assertIsNone(g.geocode_address("Two, Bengaluru"))
+            self.assertEqual(get.call_count, 2)
+            self.assertTrue(g.aborted)
+
+    def test_places_result_outside_bengaluru_is_discarded(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            g = self._geocoder(tmp)
+            delhi = {"status": "OK", "results": [{"geometry": {"location": {"lat": 28.61, "lng": 77.21}}}]}
+            with mock.patch("src.geocoder.requests.get",
+                            side_effect=[self._resp(self.GEO_MISS), self._resp(delhi)]):
+                self.assertIsNone(g.geocode_address("Delhi Confusion, Bengaluru"))
+
+    def test_other_backends_never_call_places(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            from src import geocoder
+            g = geocoder.Geocoder(cache_file=Path(tmp) / "c.json", backend="locationiq")
+            g.delay = 0
+            with mock.patch("src.geocoder.requests.get",
+                            return_value=self._resp([], status=404)) as get:
+                self.assertIsNone(g.geocode_address("Anything, Bengaluru"))
+            self.assertEqual(get.call_count, 1)
+            self.assertEqual(g.places_calls, 0)
+
+
+class TestMapPinsExport(unittest.TestCase):
+    """The Map_Pins tab is what agents import into Google My Maps."""
+
+    def _manager(self, rows):
+        from src.gsheet_manager import GoogleSheetManager
+        mgr = GoogleSheetManager.__new__(GoogleSheetManager)
+        mgr.krera_raw_sheet = mock.MagicMock()
+        mgr.krera_raw_sheet.get_all_values.return_value = rows
+        mgr.spreadsheet = mock.MagicMock()
+        mgr.pins_sheet = mgr.spreadsheet.worksheet.return_value
+        return mgr
+
+    def _row(self, rera, name, district, lat="", lng="", link="L"):
+        return [rera, name, "Promoter", "ACK", district, "url", "Approved",
+                "2026-01-01", "Pending", lat, lng, link]
+
+    def test_only_located_projects_are_exported(self):
+        rows = [KRERARawProject.sheet_headers(),
+                self._row("R1", "Located One", "Bengaluru Urban", "12.94", "77.74"),
+                self._row("R2", "Unresolved", "Bengaluru Urban"),
+                self._row("R3", "Located Two", "Bengaluru Rural", "12.86", "77.53")]
+        mgr = self._manager(rows)
+        self.assertEqual(mgr.export_map_pins(), 2)
+        values = mgr.pins_sheet.update.call_args[1]["values"]
+        self.assertEqual(values[0][0], "Project Name")
+        self.assertEqual([r[0] for r in values[1:]], ["Located One", "Located Two"])
+
+    def test_coordinates_land_in_the_columns_my_maps_expects(self):
+        rows = [KRERARawProject.sheet_headers(),
+                self._row("R1", "Located One", "Bengaluru Urban", "12.940100", "77.740900")]
+        mgr = self._manager(rows)
+        mgr.export_map_pins()
+        header, first = mgr.pins_sheet.update.call_args[1]["values"][:2]
+        self.assertEqual(header[3:5], ["Latitude", "Longitude"])
+        self.assertEqual(first[3:5], ["12.940100", "77.740900"])
+        self.assertEqual(first[5], "R1")
+
+    def test_existing_tab_is_cleared_before_rewrite(self):
+        """Otherwise a shrinking export would leave stale pins behind."""
+        rows = [KRERARawProject.sheet_headers(),
+                self._row("R1", "Located One", "Bengaluru Urban", "12.94", "77.74")]
+        mgr = self._manager(rows)
+        mgr.export_map_pins()
+        mgr.pins_sheet.clear.assert_called_once()
+
+    def test_nothing_located_writes_nothing(self):
+        rows = [KRERARawProject.sheet_headers(),
+                self._row("R1", "Unresolved", "Bengaluru Urban")]
+        mgr = self._manager(rows)
+        self.assertEqual(mgr.export_map_pins(), 0)
+        mgr.pins_sheet.update.assert_not_called()
+
+    def test_half_written_coordinates_are_skipped(self):
+        rows = [KRERARawProject.sheet_headers(),
+                self._row("R1", "Lat only", "Bengaluru Urban", "12.94", ""),
+                self._row("R2", "Lng only", "Bengaluru Urban", "", "77.74")]
+        mgr = self._manager(rows)
+        self.assertEqual(mgr.export_map_pins(), 0)
+
+
 if __name__ == "__main__":
     unittest.main()

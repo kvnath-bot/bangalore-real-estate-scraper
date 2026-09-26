@@ -43,6 +43,7 @@ from src.config import (
     GEOCODE_MAX_PER_RUN,
     GEOCODE_USER_AGENT,
     GOOGLE_MAPS_API_KEY,
+    GOOGLE_PLACES_FALLBACK,
     LOCATIONIQ_API_KEY,
     NOMINATIM_ENDPOINT,
 )
@@ -57,6 +58,7 @@ BACKEND_GEOAPIFY = "geoapify"
 GOOGLE_ENDPOINT = "https://maps.googleapis.com/maps/api/geocode/json"
 LOCATIONIQ_ENDPOINT = "https://us1.locationiq.com/v1/search"
 GEOAPIFY_ENDPOINT = "https://api.geoapify.com/v1/geocode/search"
+GOOGLE_PLACES_ENDPOINT = "https://maps.googleapis.com/maps/api/place/textsearch/json"
 
 # Per-backend pacing and default per-run budget.
 #
@@ -123,6 +125,8 @@ class Geocoder:
         self.hits = 0
         self.misses = 0
         self.aborted = False
+        self.places_calls = 0
+        self.places_hits = 0
         self.deadline = time.monotonic() + GEOCODE_TIME_BUDGET_SECONDS
         self.timed_out = False
 
@@ -367,6 +371,12 @@ class Geocoder:
             return None
 
     def _lookup_google(self, address: str) -> Optional[Tuple[float, float]]:
+        coords = self._lookup_google_geocoding(address)
+        if coords is None and GOOGLE_PLACES_FALLBACK and not self.aborted:
+            coords = self._lookup_google_places(address)
+        return coords
+
+    def _lookup_google_geocoding(self, address: str) -> Optional[Tuple[float, float]]:
         payload = self._get(
             GOOGLE_ENDPOINT,
             {"address": address, "key": GOOGLE_MAPS_API_KEY, "region": "in"},
@@ -393,6 +403,47 @@ class Geocoder:
             return (float(loc["lat"]), float(loc["lng"]))
         except (KeyError, IndexError, TypeError, ValueError):
             return None
+
+    def _lookup_google_places(self, address: str) -> Optional[Tuple[float, float]]:
+        """
+        Places Text Search, used only when Geocoding found nothing.
+
+        Geocoding resolves ADDRESSES; a K-RERA project name is not an address,
+        it is the name of a place. Places searches POIs, which is why it finds
+        the villa communities and small projects that address geocoding cannot -
+        those scored 0 of 10 on name-based geocoding in testing.
+
+        Places costs more per call than Geocoding, so it runs on misses only and
+        its calls are counted separately for cost visibility.
+        """
+        self.places_calls += 1
+        payload = self._get(
+            GOOGLE_PLACES_ENDPOINT,
+            {"query": address, "key": GOOGLE_MAPS_API_KEY, "region": "in"},
+        )
+        if not isinstance(payload, dict):
+            return None
+        status = payload.get("status")
+        if status == "ZERO_RESULTS":
+            return None
+        if status in ("REQUEST_DENIED", "OVER_QUERY_LIMIT", "INVALID_REQUEST"):
+            # Most often the Places API is simply not enabled on the project,
+            # even though Geocoding is. Say so once rather than per row.
+            self._abort(
+                f"Google Places returned '{status}' - "
+                f"{payload.get('error_message', 'check that the Places API is enabled on this key.')}"
+            )
+            return None
+        if status != "OK":
+            logger.warning(f"[Geocoder] Google Places status '{status}' for '{address}'.")
+            return None
+        try:
+            loc = payload["results"][0]["geometry"]["location"]
+            coords = (float(loc["lat"]), float(loc["lng"]))
+        except (KeyError, IndexError, TypeError, ValueError):
+            return None
+        self.places_hits += 1
+        return coords
 
     # ---------------------------------------------------------------- helpers
     @staticmethod

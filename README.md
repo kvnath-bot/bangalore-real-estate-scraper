@@ -102,6 +102,15 @@ plotted on a map:
 - A `429` from any provider **ends that run's geocoding** rather than hammering a limited endpoint; the remaining rows are picked up next time.
 - Registrations that cannot be resolved by name keep an empty Latitude/Longitude and are retried on later runs.
 - To turn the whole stage off: `GEOCODE_ENABLED=false`.
+- With the **google** backend, a miss is retried through **Places Text Search** (`GOOGLE_PLACES_FALLBACK=true`, the default). Geocoding resolves addresses; a K-RERA project name is a POI, so Places is what finds villa communities and small projects — those resolved **0 of 10** on address geocoding. It runs on misses only, and the run log reports `Places fallback: N calls, M rescued` so you can see what it cost.
+
+### Switching to Google
+
+1. Enable **Geocoding API** *and* **Places API** on the Cloud project, with billing active.
+2. Add the key as the `GOOGLE_MAPS_API_KEY` secret.
+3. Set the repo variable `GEOCODE_BACKEND=google`.
+
+Step 3 is required: free-tier providers outrank Google in auto-detection precisely so billing never starts by accident, so Google is only used when you ask for it by name.
 
 **Clearing the 5,554-row backlog without any billing**
 
@@ -111,8 +120,21 @@ plotted on a map:
 
 Verify the provider's current published free limit before raising `GEOCODE_MAX_PER_RUN` beyond the built-in ceiling — these allowances change.
 
-To plot the sheet, use **Google Sheets → Insert → Chart → Map**, or import the
-Latitude/Longitude columns into Google My Maps / Looker Studio.
+### The `Map_Pins` tab — what agents actually use
+
+Every run rebuilds a **`Map_Pins`** worksheet containing only the projects that have
+real coordinates, with `Project Name · Promoter · District · Latitude · Longitude ·
+RERA No. · Map Pin Link`. Unresolved projects are deliberately left out — a pin that
+isn't a real location has no place on a map.
+
+To publish it:
+
+1. [mymaps.google.com](https://www.google.com/mymaps) → create a map → **Import**
+2. Pick the tracker spreadsheet and the **`Map_Pins`** tab
+3. Position markers by **Latitude** and **Longitude**; title them by **Project Name**
+4. Style by **District / Region** to colour by area, then **Share** the map with your agents
+
+Re-import after a run to refresh, since My Maps takes a snapshot rather than a live feed.
 
 ---
 
