@@ -146,6 +146,40 @@ The first deploy needs GitHub Pages switched on once: it happens automatically o
 the first run after merging, or set *Settings → Pages → Source: GitHub Actions*
 if the deploy job reports it could not enable Pages.
 
+### Filters on the map, and where their data comes from
+
+The map filters by **property type, bedrooms, starting price, possession and sale
+status** — and every one of those is honest about coverage, because K-RERA
+publishes none of it. The line under each filter says how many pins have that
+data (e.g. *Price known for 218 of 1,682 pins*), and a price or bedroom filter
+**hides pins with no data** rather than guessing, with the count of hidden pins
+shown in the results header.
+
+Property type is read from the registered name where the name says it
+(`… Villas`, `… Layout`, `… Row House`); the rest show **Unknown**. Nothing else
+is inferred.
+
+Real values live in one place: the **`Listing_Data`** tab, keyed by RERA number.
+
+| Column | What to enter |
+|---|---|
+| Karnataka RERA No. | Exactly as it appears in `KRERA_Raw_Projects` — this is the join key |
+| Property Type | `Apartment` · `Villa` · `Row House / Townhouse` · `Plots` · `Commercial` |
+| BHK Options | Free text: `2, 3 & 4 BHK`, `3.5 BHK`, `2-4 BHK`, `Studio` |
+| Starting Price (Rs Lakh) | `1.2 Cr`, `85 L`, `85 lakh`, `1,20,00,000` or just `120` (lakh) — all understood |
+| Possession | `Ready to move` or a date/quarter, e.g. `Dec 2027` |
+| Sale Status | `Available` · `Sold Out` · `Not Launched` |
+| Source URL | Where the figure came from — builder page, listing, brochure |
+| Entered By / Entered On | Your name and the date; shown in the popup |
+
+Rules the pipeline enforces:
+
+- **A row you enter is never overwritten.** `src/data/listing_seed.csv` holds a
+  one-time researched seed; each run adds seed rows only for RERA numbers the
+  tab does not have yet.
+- To correct an entry, add a new row for the same RERA number — the latest wins.
+- Entries appear on the map after the next run (daily, or trigger one).
+
 ### The `Map_Pins` tab — for Google My Maps
 
 Every run rebuilds a **`Map_Pins`** worksheet containing only the projects that have
@@ -314,6 +348,7 @@ schedule:
 │   ├── config.py                      # Configurations & micro-markets
 │   ├── models.py                      # Pydantic data schemas
 │   ├── gsheet_manager.py              # Google Sheets client & deduplication
+│   ├── listing_data.py                # Price / BHK / possession layer (Listing_Data tab, parsers, seed)
 │   ├── geocoder.py                    # Cached Nominatim / Google geocoding
 │   ├── scrapers/
 │   │   ├── gemini_scraper.py          # Gemini 3.8 Flash search grounding

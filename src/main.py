@@ -31,6 +31,7 @@ from src.config import (
     SHARE_WITH_EMAILS,
 )
 from src.geocoder import Geocoder
+from src.listing_data import read_seed
 from src.enricher import ProjectEnricher
 from src.gsheet_manager import GoogleSheetManager
 from src.models import KRERARawProject, ScrapeRunSummary
@@ -287,6 +288,16 @@ def run_pipeline() -> dict:
         logger.info("[STAGE 4] Geocoding disabled via GEOCODE_ENABLED=false. Skipping.")
 
     # --------------------------------------------------------------------------
+    # STAGE 4a: Seed Listing_Data with researched prices where the tab has gaps
+    # --------------------------------------------------------------------------
+    seeded = 0
+    if gsheet.client and gsheet.listing_sheet:
+        try:
+            seeded = gsheet.upsert_listing_seed(read_seed())
+        except Exception as e:
+            logger.error(f"Listing seed failed: {e}", exc_info=True)
+
+    # --------------------------------------------------------------------------
     # STAGE 4b: Publish the agent-facing Map_Pins tab
     # --------------------------------------------------------------------------
     map_pins = 0
@@ -316,6 +327,7 @@ def run_pipeline() -> dict:
     logger.info(f"   • Existing Rows Matched: {existing_updated}")
     logger.info(f"   • Rows Geocoded This Run: {geocoded_count}")
     logger.info(f"   • Projects on the Map_Pins tab: {map_pins}")
+    logger.info(f"   • Listing_Data rows seeded this run: {seeded}")
     logger.info(f"   • Shared With: {', '.join(shared_with) if shared_with else 'nobody new'}")
     logger.info("==================================================================")
 

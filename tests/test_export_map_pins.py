@@ -89,5 +89,61 @@ class TestBuildGeojson(unittest.TestCase):
         self.assertEqual(gj["meta"]["in_region_total"], 1)
 
 
+class TestListingJoin(unittest.TestCase):
+    """Listing_Data rows join onto pins by RERA number; absence is honest, never invented."""
+
+    def _pin(self, rera, name="Project"):
+        return row(rera, name, lat="12.94", lng="77.74")
+
+    def _listing(self, rera, typ="Villa", bhk="3, 4 BHK", price="3.8 Cr", poss="May 2027",
+                 sale="Available", src="https://builder.example/x", who="research", when="2026-09-26"):
+        return [rera, typ, bhk, price, poss, sale, src, who, when, ""]
+
+    def test_listing_fields_are_joined_onto_the_pin(self):
+        gj = build_geojson([self._pin("R1")], NOW, [self._listing("R1")])
+        p = gj["features"][0]["properties"]
+        self.assertEqual(p["type"], "Villa")
+        self.assertEqual(p["type_source"], "listing")
+        self.assertEqual(p["bhk"], [3, 4])
+        self.assertEqual(p["price_lakh"], 380.0)
+        self.assertEqual(p["possession"], "May 2027")
+        self.assertEqual(p["sale_status"], "Available")
+        self.assertEqual(p["source"], "https://builder.example/x")
+        self.assertEqual(p["entered_on"], "2026-09-26")
+
+    def test_pin_without_listing_has_no_price_and_a_name_based_type(self):
+        gj = build_geojson([self._pin("R1", "KRK Urban Ville Villas")], NOW, [])
+        p = gj["features"][0]["properties"]
+        self.assertNotIn("price_lakh", p)
+        self.assertNotIn("bhk", p)
+        self.assertEqual(p["type"], "Villa")
+        self.assertEqual(p["type_source"], "name")
+
+    def test_unknown_type_stays_unknown_rather_than_guessed(self):
+        gj = build_geojson([self._pin("R1", "MBS VASUDHA")], NOW, [])
+        self.assertEqual(gj["features"][0]["properties"]["type"], "Unknown")
+
+    def test_listing_type_overrides_name_type(self):
+        gj = build_geojson([self._pin("R1", "Something Villas")], NOW, [self._listing("R1", typ="Apartment")])
+        self.assertEqual(gj["features"][0]["properties"]["type"], "Apartment")
+
+    def test_listing_with_unknown_type_does_not_override_a_name_type(self):
+        gj = build_geojson([self._pin("R1", "Something Villas")], NOW, [self._listing("R1", typ="Unknown")])
+        self.assertEqual(gj["features"][0]["properties"]["type"], "Villa")
+
+    def test_meta_counts_coverage(self):
+        gj = build_geojson(
+            [self._pin("R1"), self._pin("R2"), self._pin("R3")], NOW,
+            [self._listing("R1"), self._listing("R2", price="", bhk="2 BHK")],
+        )
+        m = gj["meta"]
+        self.assertEqual((m["with_listing"], m["with_price"], m["with_bhk"]), (2, 1, 2))
+
+    def test_listing_for_an_unlocated_or_unknown_rera_is_ignored(self):
+        gj = build_geojson([self._pin("R1")], NOW, [self._listing("R9")])
+        self.assertNotIn("price_lakh", gj["features"][0]["properties"])
+        self.assertEqual(gj["meta"]["with_listing"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -23,6 +23,7 @@ from src.config import (
     SHARE_WITH_EMAILS,
     SPREADSHEET_ID,
 )
+from src.listing_data import LISTING_HEADERS, rows_to_add
 from src.models import KRERARawProject, RealEstateProject, ScrapeRunSummary
 
 logger = logging.getLogger("gsheet.manager")
@@ -36,6 +37,7 @@ PROJECTS_WORKSHEET_NAME = "Bangalore_Projects"
 KRERA_RAW_WORKSHEET_NAME = "KRERA_Raw_Projects"
 LOGS_WORKSHEET_NAME = "Scrape_Run_Logs"
 MAP_PINS_WORKSHEET_NAME = "Map_Pins"
+LISTING_WORKSHEET_NAME = "Listing_Data"
 BATCH_CHUNK_SIZE = 1000
 
 # Columns J:M of KRERA_Raw_Projects hold Latitude / Longitude / Map Pin Link /
@@ -67,6 +69,7 @@ class GoogleSheetManager:
         self.projects_sheet = None
         self.krera_raw_sheet = None
         self.logs_sheet = None
+        self.listing_sheet = None
 
         if self.client:
             self._initialize_sheets()
@@ -159,6 +162,19 @@ class GoogleSheetManager:
                 headers = ScrapeRunSummary.log_headers()
                 self.logs_sheet.append_row(headers)
                 self._format_header_row(self.logs_sheet)
+
+            # 4. 'Listing_Data' Sheet - price / BHK / possession, keyed by RERA no.
+            # Filled by agents; seeded once from src/data/listing_seed.csv.
+            try:
+                self.listing_sheet = self.spreadsheet.worksheet(LISTING_WORKSHEET_NAME)
+            except gspread.WorksheetNotFound:
+                logger.info(f"Creating worksheet '{LISTING_WORKSHEET_NAME}'...")
+                self.listing_sheet = self.spreadsheet.add_worksheet(
+                    title=LISTING_WORKSHEET_NAME, rows=6000, cols=len(LISTING_HEADERS) + 2
+                )
+            if not self.listing_sheet.row_values(1):
+                self.listing_sheet.append_row(LISTING_HEADERS)
+                self._format_header_row(self.listing_sheet)
 
         except Exception as e:
             logger.error(f"Error initializing Google Sheets: {e}")
@@ -556,6 +572,35 @@ class GoogleSheetManager:
 
         logger.info(f"[GSheet Manager] Map_Pins refreshed with {len(pins)} pins.")
         return len(pins)
+
+    def get_listing_rows(self) -> List[List[str]]:
+        """All Listing_Data rows, header excluded. [] when the tab is unavailable."""
+        if not self.listing_sheet:
+            return []
+        try:
+            return self.listing_sheet.get_all_values()[1:]
+        except Exception as e:
+            logger.error(f"Could not read {LISTING_WORKSHEET_NAME}: {e}")
+            return []
+
+    def upsert_listing_seed(self, seed_rows: List[List[str]]) -> int:
+        """
+        Appends seed rows for RERA numbers the tab does not have yet. Rows an
+        agent has entered are never overwritten - the seed only fills gaps.
+        """
+        if not self.listing_sheet or not seed_rows:
+            return 0
+        existing = [row[0] for row in self.get_listing_rows() if row]
+        fresh = rows_to_add(existing, seed_rows)
+        if not fresh:
+            logger.info(f"[GSheet Manager] {LISTING_WORKSHEET_NAME} already has every seed row.")
+            return 0
+        logger.info(f"[GSheet Manager] Adding {len(fresh)} seed rows to {LISTING_WORKSHEET_NAME} "
+                    f"({len(existing)} rows already present, left untouched).")
+        for i in range(0, len(fresh), BATCH_CHUNK_SIZE):
+            self.listing_sheet.append_rows(fresh[i:i + BATCH_CHUNK_SIZE], value_input_option="USER_ENTERED")
+            time.sleep(1.0)
+        return len(fresh)
 
     def share_with_emails(
         self,

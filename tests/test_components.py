@@ -1219,5 +1219,41 @@ class TestGeocodeStatusStamp(unittest.TestCase):
         self.assertIn("query=Miss+Project", miss[2])
 
 
+class TestListingSeedUpsert(unittest.TestCase):
+    """The seed fills gaps in Listing_Data and never touches an agent's rows."""
+
+    def _manager(self, existing_rows):
+        from src.gsheet_manager import GoogleSheetManager
+        from src.listing_data import LISTING_HEADERS
+        mgr = GoogleSheetManager.__new__(GoogleSheetManager)
+        mgr.listing_sheet = mock.MagicMock()
+        mgr.listing_sheet.get_all_values.return_value = [LISTING_HEADERS] + existing_rows
+        return mgr
+
+    def test_only_missing_reras_are_appended(self):
+        mgr = self._manager([["R1", "Villa", "4 BHK", "3.8 Cr"]])
+        with mock.patch("src.gsheet_manager.time.sleep", lambda s_: None):
+            n = mgr.upsert_listing_seed([["R1", "Apartment", "2 BHK", "80 L"], ["R2", "Plots", "", "45 L"]])
+        self.assertEqual(n, 1)
+        appended = mgr.listing_sheet.append_rows.call_args[0][0]
+        self.assertEqual([r[0] for r in appended], ["R2"])
+
+    def test_agent_entry_is_never_overwritten(self):
+        mgr = self._manager([["R1", "Villa", "4 BHK", "3.8 Cr", "", "", "", "Asha"]])
+        with mock.patch("src.gsheet_manager.time.sleep", lambda s_: None):
+            mgr.upsert_listing_seed([["R1", "Apartment", "2 BHK", "80 L"]])
+        mgr.listing_sheet.append_rows.assert_not_called()
+        mgr.listing_sheet.update.assert_not_called()
+
+    def test_nothing_to_seed_is_a_no_op(self):
+        mgr = self._manager([])
+        self.assertEqual(mgr.upsert_listing_seed([]), 0)
+        mgr.listing_sheet.append_rows.assert_not_called()
+
+    def test_get_listing_rows_excludes_header(self):
+        mgr = self._manager([["R1", "Villa"]])
+        self.assertEqual(mgr.get_listing_rows(), [["R1", "Villa"]])
+
+
 if __name__ == "__main__":
     unittest.main()
