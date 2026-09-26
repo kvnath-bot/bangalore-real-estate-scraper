@@ -6,6 +6,7 @@ Workflow:
 3. Enriches Bangalore metropolitan projects with micro-markets, builder brands, configurations & amenities.
 4. Integrates with Propsoch and 99Acres portal listings and Gemini market intelligence.
 5. Syncs the enriched dataset into the main 'Bangalore_Projects' Google Sheet.
+6. Updates 'Enrichment Status' column in 'KRERA_Raw_Projects' to reflect enriched/synced status.
 """
 
 import json
@@ -40,7 +41,7 @@ logger = logging.getLogger("main")
 
 
 def run_pipeline() -> dict:
-    """Executes the two-stage K-RERA and portal scraping and synchronization pipeline."""
+    """Executes the two-stage K-RERA and portal scraping, enrichment, and synchronization pipeline."""
     start_time = datetime.now()
     logger.info("==================================================================")
     logger.info("  🚀 Starting Bangalore Real Estate Automated K-RERA & Portal Scraper")
@@ -73,11 +74,19 @@ def run_pipeline() -> dict:
     logger.info("------------------------------------------------------------------")
     enricher = ProjectEnricher()
     enriched_rera_projects = []
+    rera_status_map = {}
+
     for raw_p in raw_krera_projects:
+        clean_rera = raw_p.rera_number.strip()
         if raw_p.is_bangalore_region():
             enriched = enricher.enrich_raw_project(raw_p)
             if enriched:
                 enriched_rera_projects.append(enriched)
+                rera_status_map[clean_rera] = "Enriched & Synced (Bangalore)"
+            else:
+                rera_status_map[clean_rera] = "Pending"
+        else:
+            rera_status_map[clean_rera] = f"Non-Bangalore ({raw_p.district})"
 
     logger.info(f"[Enricher] Prepared {len(enriched_rera_projects)} enriched Bangalore projects from K-RERA.")
 
@@ -113,13 +122,18 @@ def run_pipeline() -> dict:
     if gsheet.client and gsheet.projects_sheet:
         try:
             new_added, existing_updated = gsheet.sync_projects(final_unique_projects)
+
+            # Update Enrichment Status in KRERA_Raw_Projects sheet
+            if gsheet.krera_raw_sheet and rera_status_map:
+                gsheet.update_krera_enrichment_statuses(rera_status_map)
+
             summary = ScrapeRunSummary(
                 engine_used="K-RERA Portal + Propsoch + 99Acres + Gemini",
                 total_found=total_bangalore_projects,
                 new_added=new_added,
                 existing_updated=existing_updated,
                 status=sync_status,
-                notes_or_errors=f"K-RERA Raw: {total_raw_krera} ({raw_added_count} new). Bangalore Enriched: {new_added} new, {existing_updated} updated."
+                notes_or_errors=f"K-RERA Raw: {total_raw_krera} ({raw_added_count} new). Bangalore Enriched: {new_added} new, {existing_updated} matched."
             )
             gsheet.log_run(summary)
             if gsheet.sheet_url:
@@ -137,7 +151,7 @@ def run_pipeline() -> dict:
     logger.info(f"   • New K-RERA Raw Added: {raw_added_count}")
     logger.info(f"   • Total Bangalore Projects: {total_bangalore_projects}")
     logger.info(f"   • Brand New Added to Bangalore_Projects: {new_added}")
-    logger.info(f"   • Existing Rows Updated: {existing_updated}")
+    logger.info(f"   • Existing Rows Matched: {existing_updated}")
     logger.info("==================================================================")
 
     return {

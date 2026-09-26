@@ -17,7 +17,7 @@ class KRERARawProject(BaseModel):
     portal_url: str = Field(default="https://rera.karnataka.gov.in/viewAllProjects?language=en")
     status: str = Field(default="Approved by K-RERA")
     discovered_date: str = Field(default_factory=lambda: datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-    enrichment_status: str = Field(default="Pending", description="Pending / Enriched & Synced")
+    enrichment_status: str = Field(default="Pending", description="Enriched & Synced (Bangalore) / Non-Bangalore (...)")
 
     @classmethod
     def get_district_from_rera(cls, rera_no: str) -> str:
@@ -49,7 +49,16 @@ class KRERARawProject(BaseModel):
             "Chikkaballapura (North Bengaluru Corridor)"
         ]
 
+    def compute_default_enrichment_status(self) -> str:
+        """Returns the appropriate enrichment status based on geography."""
+        if self.is_bangalore_region():
+            return "Enriched & Synced (Bangalore)"
+        return f"Non-Bangalore ({self.district})"
+
     def to_sheet_row(self) -> List[str]:
+        status_val = self.enrichment_status
+        if status_val == "Pending":
+            status_val = self.compute_default_enrichment_status()
         return [
             self.rera_number,
             self.project_name,
@@ -59,7 +68,7 @@ class KRERARawProject(BaseModel):
             self.portal_url,
             self.status,
             self.discovered_date,
-            self.enrichment_status,
+            status_val,
         ]
 
     @classmethod

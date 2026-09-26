@@ -1,7 +1,7 @@
 """
 Google Sheets Manager for Bangalore Real Estate Tracker.
 Handles authentication, sheet creation, KRERA_Raw_Projects sync, deduplication,
-batch appending, and daily execution logging with Google Sheets write-rate limit protection.
+batch appending, status updates, and daily execution logging with Google Sheets write-rate limit protection.
 """
 
 import json
@@ -167,12 +167,39 @@ class GoogleSheetManager:
                 logger.info(f"Writing chunk {chunk_num}/{total_chunks} ({len(chunk)} rows) to KRERA_Raw_Projects...")
                 try:
                     self.krera_raw_sheet.append_rows(chunk, value_input_option="USER_ENTERED")
-                    time.sleep(1.5)  # Rate limit safety delay
+                    time.sleep(1.5)
                 except Exception as e:
                     logger.error(f"Error appending chunk {chunk_num}: {e}")
                     time.sleep(5.0)
 
         return new_count
+
+    def update_krera_enrichment_statuses(self, rera_status_map: Dict[str, str]):
+        """
+        Batch updates Column I (Enrichment Status) for all rows in KRERA_Raw_Projects
+        in a single fast API call without hitting rate limits.
+        """
+        if not self.krera_raw_sheet:
+            return
+
+        try:
+            logger.info("[GSheet Manager] Updating Enrichment Status column in KRERA_Raw_Projects...")
+            all_reras = self.krera_raw_sheet.col_values(1)
+            if len(all_reras) <= 1:
+                return
+
+            status_updates = []
+            for rera_id in all_reras[1:]:
+                clean_rera = rera_id.strip()
+                status = rera_status_map.get(clean_rera, "Pending")
+                status_updates.append([status])
+
+            range_to_update = f"I2:I{len(status_updates) + 1}"
+            logger.info(f"Batch updating {len(status_updates)} enrichment status cells ({range_to_update})...")
+            self.krera_raw_sheet.update(range_name=range_to_update, values=status_updates, value_input_option="USER_ENTERED")
+            logger.info("Successfully updated all enrichment statuses in KRERA_Raw_Projects!")
+        except Exception as e:
+            logger.error(f"Failed to batch update KRERA_Raw_Projects enrichment status: {e}")
 
     def sync_projects(self, scraped_projects: List[RealEstateProject]) -> Tuple[int, int]:
         """
