@@ -72,6 +72,49 @@ The scraper automatically formats and manages the following data points in your 
 
 ---
 
+## 🗺️ Map Pins & Coordinates (`KRERA_Raw_Projects`)
+
+Every K-RERA registration row carries three extra columns so the registry can be
+plotted on a map:
+
+| Column | Header | Description |
+|---|---|---|
+| J | **Latitude** | Geocoded latitude, blank when the project could not be resolved |
+| K | **Longitude** | Geocoded longitude, blank when the project could not be resolved |
+| L | **Map Pin Link** | Google Maps link — an exact coordinate pin when geocoded, otherwise a name search so the cell is never dead |
+
+**How geocoding works**
+
+- Only **Bengaluru-region** districts are geocoded; the rest of Karnataka is out of scope.
+- Default backend is **Nominatim / OpenStreetMap** — free, no API key, capped by its usage policy at ~1 request/second. Set `GOOGLE_MAPS_API_KEY` to switch to the Google Geocoding API instead (much faster, billable).
+- Matches resolving outside the Bengaluru metropolitan bounding box are discarded rather than written, so a same-named project in another state never produces a wrong pin.
+- Each run spends at most `GEOCODE_MAX_PER_RUN` lookups (default `400`). Rows that already have coordinates are skipped, so a large backlog drains over consecutive daily runs — the sheet itself is the source of truth for what is done.
+- Registrations that cannot be resolved by name keep an empty Latitude/Longitude and are retried on later runs.
+- To turn the whole stage off: `GEOCODE_ENABLED=false`.
+
+To plot the sheet, use **Google Sheets → Insert → Chart → Map**, or import the
+Latitude/Longitude columns into Google My Maps / Looker Studio.
+
+---
+
+## 👥 Sharing the Sheet
+
+Set `SHARE_WITH_EMAILS` to a comma-separated list of Gmail / Workspace addresses
+and the pipeline grants them access at the end of each run:
+
+```bash
+SHARE_WITH_EMAILS=someone@gmail.com,someone.else@gmail.com
+SHARE_ROLE=writer      # reader | commenter | writer
+SHARE_NOTIFY=false     # true sends a Drive notification email
+```
+
+In GitHub Actions, add `SHARE_WITH_EMAILS` as a repository **secret**; `SHARE_ROLE`
+and `SHARE_NOTIFY` are read from repository **variables**. Sharing is idempotent —
+re-granting an existing permission is a no-op, and one bad address never blocks
+the others.
+
+---
+
 ## 🚀 Quickstart: Automated Setup with GitHub Actions (Recommended)
 
 ### Step 1: Clone or Push this Repo to GitHub
@@ -155,6 +198,7 @@ schedule:
 │   ├── config.py                      # Configurations & micro-markets
 │   ├── models.py                      # Pydantic data schemas
 │   ├── gsheet_manager.py              # Google Sheets client & deduplication
+│   ├── geocoder.py                    # Cached Nominatim / Google geocoding
 │   ├── scrapers/
 │   │   ├── gemini_scraper.py          # Gemini 3.8 Flash search grounding
 │   │   ├── perplexity_scraper.py      # Perplexity Sonar search

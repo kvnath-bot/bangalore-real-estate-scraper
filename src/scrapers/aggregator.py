@@ -99,13 +99,21 @@ class RealEstateAggregator:
         seen: Dict[str, RealEstateProject] = {}
 
         for p in projects:
-            key = p.deduplication_key()
-            if key not in seen:
-                seen[key] = p
+            # Match on any of the incoming record's identity keys, so a record
+            # with a real RERA number merges into one previously seen only by
+            # name (and vice versa) instead of becoming a second row.
+            existing = None
+            for key in p.identity_keys():
+                if key in seen:
+                    existing = seen[key]
+                    break
+
+            if existing is None:
+                for key in p.identity_keys():
+                    seen[key] = p
             else:
-                existing = seen[key]
                 # Merge RERA number
-                if ("pending" in existing.rera_number.lower() or "verified" in existing.rera_number.lower() or not existing.rera_number) and p.rera_number and "pending" not in p.rera_number.lower():
+                if not RealEstateProject.is_valid_rera(existing.rera_number) and RealEstateProject.is_valid_rera(p.rera_number):
                     existing.rera_number = p.rera_number
                 # Merge price
                 if (existing.price_range in ("On Request", "On Propsoch") or not existing.price_range) and p.price_range not in ("On Request", "On Propsoch"):
@@ -123,4 +131,17 @@ class RealEstateAggregator:
                     existing.key_amenities = p.key_amenities
                 existing.last_updated = p.last_updated
 
-        return list(seen.values())
+                # The survivor may have just gained a RERA number; index it
+                # under every key it now answers to.
+                for key in existing.identity_keys():
+                    seen.setdefault(key, existing)
+
+        # One record can be registered under several keys - de-duplicate by
+        # object identity, preserving discovery order.
+        unique: List[RealEstateProject] = []
+        seen_ids = set()
+        for project in seen.values():
+            if id(project) not in seen_ids:
+                seen_ids.add(id(project))
+                unique.append(project)
+        return unique

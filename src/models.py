@@ -4,6 +4,7 @@ Data models for Bangalore Real Estate Project Scraper and Karnataka RERA Raw Reg
 
 from datetime import datetime
 from typing import List, Optional
+from urllib.parse import quote_plus
 from pydantic import BaseModel, Field
 
 
@@ -18,6 +19,9 @@ class KRERARawProject(BaseModel):
     status: str = Field(default="Approved by K-RERA")
     discovered_date: str = Field(default_factory=lambda: datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
     enrichment_status: str = Field(default="Pending", description="Enriched & Synced (Bangalore) / Non-Bangalore (...)")
+    latitude: str = Field(default="", description="Geocoded latitude of the project (blank when unresolved)")
+    longitude: str = Field(default="", description="Geocoded longitude of the project (blank when unresolved)")
+    map_pin_link: str = Field(default="", description="Google Maps link - a coordinate pin when geocoded, else a name search")
 
     @classmethod
     def get_district_from_rera(cls, rera_no: str) -> str:
@@ -55,6 +59,23 @@ class KRERARawProject(BaseModel):
             return "Enriched & Synced (Bangalore)"
         return f"Non-Bangalore ({self.district})"
 
+    def geocode_query(self) -> str:
+        """Free-text address handed to the geocoder for this registration."""
+        district = self.district.split("(")[0].strip()
+        if district in ("Other Karnataka", ""):
+            district = "Bengaluru"
+        return f"{self.project_name.strip()}, {district}, Karnataka, India"
+
+    def build_map_pin_link(self) -> str:
+        """
+        Google Maps link for this project. Prefers an exact coordinate pin and
+        degrades to a name search so every row stays clickable.
+        """
+        if self.latitude and self.longitude:
+            return f"https://www.google.com/maps/search/?api=1&query={self.latitude},{self.longitude}"
+        query = quote_plus(self.geocode_query())
+        return f"https://www.google.com/maps/search/?api=1&query={query}"
+
     def to_sheet_row(self) -> List[str]:
         status_val = self.enrichment_status
         if status_val == "Pending":
@@ -69,6 +90,9 @@ class KRERARawProject(BaseModel):
             self.status,
             self.discovered_date,
             status_val,
+            self.latitude,
+            self.longitude,
+            self.map_pin_link or self.build_map_pin_link(),
         ]
 
     @classmethod
@@ -83,6 +107,9 @@ class KRERARawProject(BaseModel):
             "K-RERA Status",
             "Discovered Date",
             "Enrichment Status",
+            "Latitude",
+            "Longitude",
+            "Map Pin Link",
         ]
 
 
@@ -105,15 +132,45 @@ class RealEstateProject(BaseModel):
     first_discovered: str = Field(default_factory=lambda: datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
     last_updated: str = Field(default_factory=lambda: datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
 
-    def deduplication_key(self) -> str:
-        """Unique key to identify duplicates."""
-        clean_rera = "".join(filter(str.isalnum, self.rera_number.lower()))
-        if clean_rera and "pending" not in clean_rera and "not" not in clean_rera and "verified" not in clean_rera and len(clean_rera) > 6:
-            return f"rera:{clean_rera}"
-        
+    @staticmethod
+    def is_valid_rera(rera_number: str) -> bool:
+        """
+        True when a RERA string is a real registration ID rather than a
+        placeholder like "Pending", "Not Specified" or "To be verified".
+        """
+        clean = "".join(filter(str.isalnum, (rera_number or "").lower()))
+        if not clean or len(clean) <= 6:
+            return False
+        return not any(token in clean for token in ("pending", "not", "verified"))
+
+    def rera_key(self) -> str:
+        """Identity key based on the RERA registration, or "" when there isn't a real one."""
+        if not self.is_valid_rera(self.rera_number):
+            return ""
+        return f"rera:{''.join(filter(str.isalnum, self.rera_number.lower()))}"
+
+    def name_key(self) -> str:
+        """Identity key based on project name + builder, always available."""
         clean_proj = "".join(filter(str.isalnum, self.project_name.lower()))
         clean_builder = "".join(filter(str.isalnum, self.builder_name.lower()))
         return f"name:{clean_proj}|{clean_builder}"
+
+    def identity_keys(self) -> List[str]:
+        """
+        Every key this project can be recognised by. A record carrying a real
+        RERA number is also indexed by name, so the same project discovered
+        twice - once from a portal without a RERA number, once from K-RERA with
+        one - still collapses into a single row.
+        """
+        keys = [self.name_key()]
+        rera = self.rera_key()
+        if rera:
+            keys.insert(0, rera)
+        return keys
+
+    def deduplication_key(self) -> str:
+        """Preferred single key for this project: RERA when real, else name + builder."""
+        return self.rera_key() or self.name_key()
 
     def to_sheet_row(self) -> List[str]:
         return [

@@ -7,6 +7,8 @@ Workflow:
 4. Integrates with Propsoch and 99Acres portal listings and Gemini market intelligence.
 5. Syncs the enriched dataset into the main 'Bangalore_Projects' Google Sheet.
 6. Updates 'Enrichment Status' column in 'KRERA_Raw_Projects' to reflect enriched/synced status.
+7. Geocodes Bangalore-region registrations and writes Latitude / Longitude / Map Pin Link.
+8. Shares the spreadsheet with the configured SHARE_WITH_EMAILS recipients.
 """
 
 import json
@@ -21,13 +23,17 @@ if str(ROOT_DIR) not in sys.path:
 
 from src.config import (
     GEMINI_API_KEY,
+    GEOCODE_ENABLED,
+    GEOCODE_MAX_PER_RUN,
     GOOGLE_SHEET_NAME,
     PERPLEXITY_API_KEY,
     SEARCH_STRATEGY,
+    SHARE_WITH_EMAILS,
 )
+from src.geocoder import Geocoder
 from src.enricher import ProjectEnricher
 from src.gsheet_manager import GoogleSheetManager
-from src.models import ScrapeRunSummary
+from src.models import KRERARawProject, ScrapeRunSummary
 from src.scrapers.aggregator import RealEstateAggregator
 from src.scrapers.krera_scraper import KRERAParser
 
@@ -38,6 +44,74 @@ logging.basicConfig(
     handlers=[logging.StreamHandler(sys.stdout)]
 )
 logger = logging.getLogger("main")
+
+
+def run_geocoding_stage(gsheet: GoogleSheetManager) -> int:
+    """
+    Resolves coordinates for KRERA_Raw_Projects rows that do not have them yet
+    and writes Latitude / Longitude / Map Pin Link back in batched ranges.
+
+    Only Bangalore-region rows are sent to the geocoder - the rest of Karnataka
+    is out of scope for this tracker. Every row still receives a map pin link:
+    an exact coordinate pin when geocoding succeeded, otherwise a Google Maps
+    name search, so no cell is left dead.
+
+    Lookups are capped at GEOCODE_MAX_PER_RUN per run and cached on disk, so a
+    large backlog drains over consecutive daily runs instead of one long job.
+    """
+    pending = gsheet.get_krera_rows_needing_coordinates()
+    if not pending:
+        logger.info("[Geocoder] Every row already has coordinates. Nothing to do.")
+        return 0
+
+    geocoder = Geocoder()
+    row_values = {}
+    attempted = 0
+
+    for entry in pending:
+        raw = KRERARawProject(
+            rera_number=entry["rera_number"],
+            project_name=entry["project_name"] or entry["rera_number"],
+            promoter_name="",
+            district=entry["district"] or KRERARawProject.get_district_from_rera(entry["rera_number"]),
+        )
+
+        latitude = ""
+        longitude = ""
+        if raw.is_bangalore_region():
+            before = geocoder.lookups_used
+            coords = geocoder.geocode_address(raw.geocode_query())
+            attempted += geocoder.lookups_used - before
+            if coords:
+                latitude = f"{coords[0]:.6f}"
+                longitude = f"{coords[1]:.6f}"
+
+        raw.latitude = latitude
+        raw.longitude = longitude
+        link = raw.build_map_pin_link()
+
+        # Skip rows where nothing useful changed: no coordinates found and the
+        # row already carries a search link from a previous run.
+        if not latitude and not raw.is_bangalore_region():
+            continue
+
+        row_values[entry["row"]] = [latitude, longitude, link]
+
+        if attempted and attempted % 50 == 0:
+            logger.info(
+                f"[Geocoder] {attempted} lookups attempted "
+                f"({geocoder.hits} resolved, {geocoder.misses} unresolved, "
+                f"{geocoder.budget_remaining} of this run's budget left)."
+            )
+
+    geocoder.save_cache()
+    logger.info(
+        f"[Geocoder] Lookups this run: {geocoder.lookups_used}/{GEOCODE_MAX_PER_RUN} "
+        f"| resolved: {geocoder.hits} | unresolved: {geocoder.misses} "
+        f"| rows still awaiting coordinates: {max(0, len(pending) - geocoder.hits)}"
+    )
+
+    return gsheet.update_krera_map_columns(row_values)
 
 
 def run_pipeline() -> dict:
@@ -144,6 +218,31 @@ def run_pipeline() -> dict:
     else:
         logger.warning("Google Sheet not connected. Results saved to local JSON backup.")
 
+    # --------------------------------------------------------------------------
+    # STAGE 4: Geocode Bangalore Registrations & Write Map Pin Links
+    # --------------------------------------------------------------------------
+    geocoded_count = 0
+    if GEOCODE_ENABLED and gsheet.client and gsheet.krera_raw_sheet:
+        logger.info("------------------------------------------------------------------")
+        logger.info(" [STAGE 4] Geocoding K-RERA projects & building map pin links...")
+        logger.info("------------------------------------------------------------------")
+        try:
+            geocoded_count = run_geocoding_stage(gsheet)
+        except Exception as e:
+            logger.error(f"Geocoding stage failed: {e}", exc_info=True)
+    elif not GEOCODE_ENABLED:
+        logger.info("[STAGE 4] Geocoding disabled via GEOCODE_ENABLED=false. Skipping.")
+
+    # --------------------------------------------------------------------------
+    # STAGE 5: Share the Spreadsheet with the Configured Recipients
+    # --------------------------------------------------------------------------
+    shared_with = []
+    if gsheet.client and SHARE_WITH_EMAILS:
+        logger.info("------------------------------------------------------------------")
+        logger.info(f" [STAGE 5] Sharing spreadsheet with {len(SHARE_WITH_EMAILS)} recipient(s)...")
+        logger.info("------------------------------------------------------------------")
+        shared_with = gsheet.share_with_emails()
+
     elapsed = (datetime.now() - start_time).total_seconds()
     logger.info("==================================================================")
     logger.info(f"✅ Pipeline Completed in {elapsed:.1f}s")
@@ -152,6 +251,8 @@ def run_pipeline() -> dict:
     logger.info(f"   • Total Bangalore Projects: {total_bangalore_projects}")
     logger.info(f"   • Brand New Added to Bangalore_Projects: {new_added}")
     logger.info(f"   • Existing Rows Matched: {existing_updated}")
+    logger.info(f"   • Rows Geocoded This Run: {geocoded_count}")
+    logger.info(f"   • Shared With: {', '.join(shared_with) if shared_with else 'nobody new'}")
     logger.info("==================================================================")
 
     return {
@@ -161,6 +262,8 @@ def run_pipeline() -> dict:
         "total_bangalore_projects": total_bangalore_projects,
         "new_added": new_added,
         "existing_updated": existing_updated,
+        "geocoded": geocoded_count,
+        "shared_with": shared_with,
         "elapsed_seconds": elapsed,
         "sheet_url": gsheet.sheet_url if gsheet.client else None
     }

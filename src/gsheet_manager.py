@@ -8,13 +8,16 @@ import json
 import logging
 import os
 import time
-from typing import Dict, List, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 import gspread
 from google.oauth2.service_account import Credentials
 from src.config import (
     GCP_SERVICE_ACCOUNT_FILE,
     GCP_SERVICE_ACCOUNT_KEY,
     GOOGLE_SHEET_NAME,
+    SHARE_NOTIFY,
+    SHARE_ROLE,
+    SHARE_WITH_EMAILS,
     SPREADSHEET_ID,
 )
 from src.models import KRERARawProject, RealEstateProject, ScrapeRunSummary
@@ -30,6 +33,10 @@ PROJECTS_WORKSHEET_NAME = "Bangalore_Projects"
 KRERA_RAW_WORKSHEET_NAME = "KRERA_Raw_Projects"
 LOGS_WORKSHEET_NAME = "Scrape_Run_Logs"
 BATCH_CHUNK_SIZE = 1000
+
+# Columns J, K, L of KRERA_Raw_Projects hold Latitude / Longitude / Map Pin Link.
+MAP_COL_START = "J"
+MAP_COL_END = "L"
 
 
 class GoogleSheetManager:
@@ -104,10 +111,19 @@ class GoogleSheetManager:
                     title=KRERA_RAW_WORKSHEET_NAME, rows=15000, cols=15
                 )
             raw_headers = self.krera_raw_sheet.row_values(1)
+            expected_raw_headers = KRERARawProject.sheet_headers()
             if not raw_headers:
-                headers = KRERARawProject.sheet_headers()
-                self.krera_raw_sheet.append_row(headers)
+                self.krera_raw_sheet.append_row(expected_raw_headers)
                 self._format_header_row(self.krera_raw_sheet)
+            elif raw_headers != expected_raw_headers:
+                # Sheets created before the Latitude / Longitude / Map Pin Link
+                # columns existed keep their data; only the header row is widened.
+                logger.info("Upgrading KRERA_Raw_Projects header row to include map columns...")
+                self.krera_raw_sheet.update(
+                    range_name=f"A1:{chr(ord('A') + len(expected_raw_headers) - 1)}1",
+                    values=[expected_raw_headers],
+                    value_input_option="USER_ENTERED",
+                )
 
             # 3. 'Scrape_Run_Logs' Sheet
             try:
@@ -222,22 +238,28 @@ class GoogleSheetManager:
             builder_name = row[1] if len(row) > 1 else ""
             rera_no = row[8] if len(row) > 8 else ""
 
-            clean_rera = "".join(filter(str.isalnum, rera_no.lower()))
-            if clean_rera and "pending" not in clean_rera and "not" not in clean_rera and "verified" not in clean_rera and len(clean_rera) > 6:
-                existing_keys[f"rera:{clean_rera}"] = idx
-            else:
-                clean_p = "".join(filter(str.isalnum, proj_name.lower()))
-                clean_b = "".join(filter(str.isalnum, builder_name.lower()))
-                existing_keys[f"name:{clean_p}|{clean_b}"] = idx
+            # Index each existing row under every key it can be recognised by,
+            # so a project already in the sheet is never appended a second time
+            # just because this run discovered it without a RERA number.
+            row_project = RealEstateProject(
+                project_name=proj_name,
+                builder_name=builder_name,
+                locality="",
+                rera_number=rera_no or "Pending",
+            )
+            for key in row_project.identity_keys():
+                existing_keys[key] = idx
 
         new_rows_to_append: List[List[str]] = []
         updated_count = 0
 
         for project in scraped_projects:
-            key = project.deduplication_key()
-            if key not in existing_keys:
+            matched = next((k for k in project.identity_keys() if k in existing_keys), None)
+            if matched is None:
                 new_rows_to_append.append(project.to_sheet_row())
-                existing_keys[key] = len(data_rows) + len(new_rows_to_append) + 1
+                row_index = len(data_rows) + len(new_rows_to_append) + 1
+                for key in project.identity_keys():
+                    existing_keys[key] = row_index
             else:
                 updated_count += 1
 
@@ -260,6 +282,130 @@ class GoogleSheetManager:
             self.logs_sheet.append_row(summary.to_log_row(), value_input_option="USER_ENTERED")
         except Exception as e:
             logger.error(f"Failed to append to run log sheet: {e}")
+
+    def get_krera_rows_needing_coordinates(self) -> List[Dict[str, str]]:
+        """
+        Returns the KRERA_Raw_Projects rows that still have no latitude/longitude,
+        each tagged with its 1-based sheet row number so results can be written
+        straight back into columns J:L.
+        """
+        if not self.krera_raw_sheet:
+            return []
+        try:
+            all_rows = self.krera_raw_sheet.get_all_values()
+        except Exception as e:
+            logger.error(f"Could not read KRERA_Raw_Projects for geocoding: {e}")
+            return []
+
+        pending: List[Dict[str, str]] = []
+        for idx, row in enumerate(all_rows[1:], start=2):
+            if not row or not row[0].strip():
+                continue
+            latitude = row[9].strip() if len(row) > 9 else ""
+            longitude = row[10].strip() if len(row) > 10 else ""
+            if latitude and longitude:
+                continue
+            pending.append({
+                "row": idx,
+                "rera_number": row[0].strip(),
+                "project_name": row[1].strip() if len(row) > 1 else "",
+                "district": row[4].strip() if len(row) > 4 else "",
+            })
+        logger.info(f"[GSheet Manager] {len(pending)} KRERA_Raw_Projects rows still need coordinates.")
+        return pending
+
+    def update_krera_map_columns(self, row_values: Dict[int, List[str]]) -> int:
+        """
+        Batch writes Latitude / Longitude / Map Pin Link (columns J:L) for the
+        given sheet rows. Contiguous rows are merged into single ranges so a few
+        thousand updates cost only a handful of API calls.
+
+        row_values maps a 1-based sheet row number to [latitude, longitude, link].
+        """
+        if not self.krera_raw_sheet or not row_values:
+            return 0
+
+        ordered = sorted(row_values.items())
+        requests_payload = []
+        block_start = ordered[0][0]
+        block: List[List[str]] = []
+        previous_row = None
+
+        for row_num, values in ordered:
+            if previous_row is not None and row_num != previous_row + 1:
+                requests_payload.append({
+                    "range": f"{MAP_COL_START}{block_start}:{MAP_COL_END}{block_start + len(block) - 1}",
+                    "values": block,
+                })
+                block_start = row_num
+                block = []
+            block.append(values)
+            previous_row = row_num
+
+        if block:
+            requests_payload.append({
+                "range": f"{MAP_COL_START}{block_start}:{MAP_COL_END}{block_start + len(block) - 1}",
+                "values": block,
+            })
+
+        written = 0
+        logger.info(
+            f"[GSheet Manager] Writing map data for {len(ordered)} rows "
+            f"in {len(requests_payload)} contiguous range(s)..."
+        )
+        for i in range(0, len(requests_payload), 100):
+            chunk = requests_payload[i:i + 100]
+            try:
+                self.krera_raw_sheet.batch_update(chunk, value_input_option="USER_ENTERED")
+                written += sum(len(r["values"]) for r in chunk)
+                time.sleep(1.5)
+            except Exception as e:
+                logger.error(f"Failed writing map-column batch starting at index {i}: {e}")
+                time.sleep(5.0)
+
+        logger.info(f"[GSheet Manager] Wrote coordinates and map pins for {written} rows.")
+        return written
+
+    def share_with_emails(
+        self,
+        emails: Optional[List[str]] = None,
+        role: Optional[str] = None,
+        notify: Optional[bool] = None,
+    ) -> List[str]:
+        """
+        Grants the given addresses access to the spreadsheet via the Drive API.
+        Defaults come from SHARE_WITH_EMAILS / SHARE_ROLE / SHARE_NOTIFY.
+        Returns the addresses that were shared successfully.
+        """
+        if not self.spreadsheet:
+            logger.warning("No spreadsheet open; cannot share.")
+            return []
+
+        targets = [e.strip() for e in (emails if emails is not None else SHARE_WITH_EMAILS) if e and e.strip()]
+        if not targets:
+            logger.info("[GSheet Manager] No SHARE_WITH_EMAILS configured; skipping sharing step.")
+            return []
+
+        share_role = (role or SHARE_ROLE or "writer").lower()
+        if share_role not in ("reader", "commenter", "writer", "owner"):
+            logger.warning(f"Unsupported share role '{share_role}'; falling back to 'writer'.")
+            share_role = "writer"
+        send_notification = SHARE_NOTIFY if notify is None else notify
+
+        shared: List[str] = []
+        for email in targets:
+            try:
+                self.spreadsheet.share(
+                    email,
+                    perm_type="user",
+                    role=share_role,
+                    notify=send_notification,
+                )
+                shared.append(email)
+                logger.info(f"[GSheet Manager] Shared sheet with {email} as '{share_role}'.")
+            except Exception as e:
+                logger.error(f"Failed to share sheet with {email}: {e}")
+        return shared
 
     @property
     def sheet_url(self) -> str:
