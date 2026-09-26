@@ -2,10 +2,22 @@
 Data models for Bangalore Real Estate Project Scraper and Karnataka RERA Raw Registry.
 """
 
+import re
 from datetime import datetime
 from typing import List, Optional
 from urllib.parse import quote_plus
 from pydantic import BaseModel, Field, model_validator
+
+
+# Phase / wing / block markers that K-RERA appends to a registration but no map
+# has ever heard of: "GODREJ FLORENNE PHASE II" is not a place, "GODREJ FLORENNE"
+# is. 17.4% of Bangalore-region names carry this noise. Module level, because
+# pydantic turns underscore-prefixed class attributes into private attrs.
+UNIT_SUFFIX_RE = re.compile(
+    r"[\s,\-]*\b(phase|ph|wing|block|tower|twr|annexe|annex|part|stage)\b[\s\-]*[\w&,\s]*$",
+    re.IGNORECASE,
+)
+PARENTHETICAL_RE = re.compile(r"\s*\([^)]*\)")
 
 
 class KRERARawProject(BaseModel):
@@ -80,12 +92,55 @@ class KRERARawProject(BaseModel):
             return "Enriched & Synced (Bangalore)"
         return f"Non-Bangalore ({self.district})"
 
+    @classmethod
+    def clean_project_name(cls, name: str) -> str:
+        """
+        Strips the registration-unit noise from a project name.
+
+            'Purva Park Hill (Wing D)'            -> 'Purva Park Hill'
+            'Sobha Rain Forest Phase 3 Wing 5'    -> 'Sobha Rain Forest'
+            'Nikoo Homes 9, Alpine, Garden Ph-1'  -> 'Nikoo Homes 9, Alpine, Garden'
+        """
+        cleaned = PARENTHETICAL_RE.sub("", name or "").strip()
+        previous = None
+        while previous != cleaned:
+            previous = cleaned
+            cleaned = UNIT_SUFFIX_RE.sub("", cleaned).strip(" ,-")
+        return cleaned or (name or "").strip()
+
+    def _district_label(self) -> str:
+        district = self.district.split("(")[0].strip()
+        return "Bengaluru" if district in ("Other Karnataka", "") else district
+
     def geocode_query(self) -> str:
         """Free-text address handed to the geocoder for this registration."""
-        district = self.district.split("(")[0].strip()
-        if district in ("Other Karnataka", ""):
-            district = "Bengaluru"
-        return f"{self.project_name.strip()}, {district}, Karnataka, India"
+        return f"{self.project_name.strip()}, {self._district_label()}, Karnataka, India"
+
+    def geocode_queries(self) -> List[str]:
+        """
+        Query variants to try, in order, until one resolves.
+
+        A single phrasing gives up too easily: the registered name often carries
+        phase/wing noise, and the district qualifier can itself narrow a search
+        past the point where the geocoder finds anything. Each variant costs one
+        lookup, which is affordable on a few-thousand-a-day free tier.
+        """
+        district = self._district_label()
+        name = self.project_name.strip()
+        cleaned = self.clean_project_name(name)
+
+        variants = [f"{name}, {district}, Karnataka, India"]
+        if cleaned and cleaned.lower() != name.lower():
+            variants.append(f"{cleaned}, {district}, Karnataka, India")
+        variants.append(f"{cleaned or name}, Bengaluru, Karnataka, India")
+
+        seen, ordered = set(), []
+        for v in variants:
+            key = " ".join(v.lower().split())
+            if key not in seen:
+                seen.add(key)
+                ordered.append(v)
+        return ordered
 
     def build_map_pin_link(self) -> str:
         """

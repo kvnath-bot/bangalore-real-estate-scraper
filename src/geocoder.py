@@ -126,6 +126,8 @@ class Geocoder:
         self.misses = 0
         self.aborted = False
         self.places_calls = 0
+        self.first_try_hits = 0
+        self.variant_hits = 0
         self.places_hits = 0
         self.deadline = time.monotonic() + GEOCODE_TIME_BUDGET_SECONDS
         self.timed_out = False
@@ -260,6 +262,28 @@ class Geocoder:
         else:
             self.misses += 1
         return coords
+
+    def geocode_any(self, queries) -> Optional[Tuple[float, float]]:
+        """
+        Tries each phrasing in turn and returns the first that resolves.
+
+        One phrasing gives up too easily: the registered name often carries
+        phase/wing noise ("GODREJ FLORENNE PHASE II" is not a place), and the
+        district qualifier can itself narrow a search past the point where the
+        geocoder finds anything. Variants after the first are counted separately
+        so the run log shows whether the extra lookups are earning their keep.
+        """
+        for index, query in enumerate(queries):
+            coords = self.geocode_address(query)
+            if coords:
+                if index == 0:
+                    self.first_try_hits += 1
+                else:
+                    self.variant_hits += 1
+                return coords
+            if self.budget_remaining <= 0:
+                break
+        return None
 
     def _lookup(self, address: str) -> Optional[Tuple[float, float]]:
         """Dispatches to the active backend, resolved by name at call time."""
