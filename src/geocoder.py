@@ -115,6 +115,7 @@ class Geocoder:
         self.lookups_used = 0
         self.hits = 0
         self.misses = 0
+        self.aborted = False
 
         self.backend = backend or resolve_backend()
         settings = BACKEND_SETTINGS.get(self.backend, BACKEND_SETTINGS[BACKEND_NOMINATIM])
@@ -169,7 +170,23 @@ class Geocoder:
 
     @property
     def budget_remaining(self) -> int:
+        if self.aborted:
+            return 0
         return max(0, self.max_lookups - self.lookups_used)
+
+    def _abort(self, reason: str):
+        """
+        Stops geocoding for the rest of this run.
+
+        Used for conditions that will not improve by retrying - a rejected key,
+        an unenabled API, an exhausted daily quota. Without this, a dead key
+        burns the entire budget emitting one identical warning per row, which is
+        exactly what a live run did: 102 REQUEST_DENIED warnings in 12 seconds
+        before it was cancelled by hand.
+        """
+        if not self.aborted:
+            self.aborted = True
+            logger.error(f"[Geocoder] {reason} Geocoding stops for this run.")
 
     # -------------------------------------------------------------- public API
     def geocode_address(self, address: str) -> Optional[Tuple[float, float]]:
@@ -197,6 +214,12 @@ class Geocoder:
             logger.debug(f"[Geocoder] Discarded out-of-region match for '{address}': {coords}")
             coords = None
 
+        if self.aborted and not coords:
+            # The lookup failed because of a key/quota problem, not because this
+            # project has no coordinates. Caching it as a miss would permanently
+            # skip the row once the key is fixed, so leave it uncached.
+            return None
+
         self.cache[key] = [coords[0], coords[1]] if coords else None
         if coords:
             self.hits += 1
@@ -214,13 +237,17 @@ class Geocoder:
         try:
             resp = requests.get(url, params=params, headers=headers or {}, timeout=20)
             time.sleep(self.delay)
+            if resp.status_code in (401, 403):
+                self._abort(
+                    f"{self.backend} rejected the API key (HTTP {resp.status_code}) - "
+                    f"check the key is correct and the service is enabled."
+                )
+                return None
             if resp.status_code == 429:
-                logger.warning(
-                    f"[Geocoder] {self.backend} rate-limited this run (HTTP 429). "
+                self._abort(
+                    f"{self.backend} rate-limited this run (HTTP 429). "
                     f"Remaining rows will be retried on the next run."
                 )
-                # Burn the budget so the run stops hammering a limited endpoint.
-                self.lookups_used = self.max_lookups
                 return None
             if resp.status_code != 200:
                 logger.warning(f"[Geocoder] {self.backend} returned HTTP {resp.status_code}.")
@@ -283,6 +310,15 @@ class Geocoder:
             return None
         status = payload.get("status")
         if status == "ZERO_RESULTS":
+            return None
+        if status in ("REQUEST_DENIED", "OVER_QUERY_LIMIT", "OVER_DAILY_LIMIT", "INVALID_REQUEST"):
+            # REQUEST_DENIED almost always means the Geocoding API is not enabled
+            # on the project, or the project has no billing account. Retrying
+            # 5,000 times cannot fix either.
+            self._abort(
+                f"Google Geocoding returned '{status}' - "
+                f"{payload.get('error_message', 'check the key, API enablement and billing.')}"
+            )
             return None
         if status != "OK":
             logger.warning(f"[Geocoder] Google Geocoding status '{status}' for '{address}'.")
