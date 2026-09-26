@@ -32,8 +32,18 @@ GCP_SERVICE_ACCOUNT_FILE = os.getenv("GCP_SERVICE_ACCOUNT_FILE", "service_accoun
 # Master switch for the geocoding stage.
 GEOCODE_ENABLED = os.getenv("GEOCODE_ENABLED", "true").strip().lower() in ("1", "true", "yes")
 
-# Optional Google Geocoding API key. When present it replaces the free Nominatim
-# backend (far faster and no 1 req/sec ceiling, but billable).
+# Which geocoding backend to use: "locationiq", "geoapify", "google" or
+# "nominatim". Leave blank to auto-detect from whichever API key is set.
+GEOCODE_BACKEND = os.getenv("GEOCODE_BACKEND", "").strip().lower()
+
+# Free-tier geocoders. Both are email-signup only - no credit card, no billing
+# account - and sustain thousands of lookups a day, unlike the public Nominatim
+# endpoint whose usage policy forbids bulk geocoding.
+LOCATIONIQ_API_KEY = os.getenv("LOCATIONIQ_API_KEY", "").strip()
+GEOAPIFY_API_KEY = os.getenv("GEOAPIFY_API_KEY", "").strip()
+
+# Optional Google Geocoding API key. Fastest, but REQUIRES a billing account on
+# the Cloud project, so it is deliberately ranked below the free-tier providers.
 GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY", "").strip()
 
 # Free OpenStreetMap geocoder. Its usage policy requires an identifying User-Agent.
@@ -43,9 +53,10 @@ GEOCODE_USER_AGENT = os.getenv(
     "bangalore-real-estate-scraper/1.0 (github.com/kvnath-bot/bangalore-real-estate-scraper)",
 ).strip()
 
-# Lookups spent per run. Nominatim is capped at ~1 req/sec, so 400 uncached
-# projects cost roughly 8 minutes. The disk cache carries progress between runs.
-GEOCODE_MAX_PER_RUN = int(os.getenv("GEOCODE_MAX_PER_RUN", "400"))
+# Lookups spent per run. 0 means "use the chosen backend's own ceiling", which
+# is small for public Nominatim (policy) and a few thousand for the free-tier
+# providers. Set a number to override. The sheet carries progress between runs.
+GEOCODE_MAX_PER_RUN = int(os.getenv("GEOCODE_MAX_PER_RUN", "0"))
 GEOCODE_CACHE_FILE = Path(os.getenv("GEOCODE_CACHE_FILE", str(ROOT_DIR / "src" / "data" / "geocode_cache.json")))
 
 # --- Google Sheet Sharing ---

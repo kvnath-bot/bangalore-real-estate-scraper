@@ -24,7 +24,6 @@ if str(ROOT_DIR) not in sys.path:
 from src.config import (
     GEMINI_API_KEY,
     GEOCODE_ENABLED,
-    GEOCODE_MAX_PER_RUN,
     GOOGLE_SHEET_NAME,
     PERPLEXITY_API_KEY,
     SEARCH_STRATEGY,
@@ -106,7 +105,8 @@ def run_geocoding_stage(gsheet: GoogleSheetManager) -> int:
 
     geocoder.save_cache()
     logger.info(
-        f"[Geocoder] Lookups this run: {geocoder.lookups_used}/{GEOCODE_MAX_PER_RUN} "
+        f"[Geocoder] Lookups this run: {geocoder.lookups_used}/{geocoder.max_lookups} "
+        f"via '{geocoder.backend}' "
         f"| resolved: {geocoder.hits} | unresolved: {geocoder.misses} "
         f"| rows still awaiting coordinates: {max(0, len(pending) - geocoder.hits)}"
     )

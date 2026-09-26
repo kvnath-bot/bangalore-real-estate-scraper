@@ -5,10 +5,10 @@ Tests data models, deduplication logic, JSON parsing, and sheet formatting.
 
 import tempfile
 import unittest
+from contextlib import nullcontext as _nullcontext
 from pathlib import Path
 from unittest import mock
 
-from src.config import GEOCODE_MAX_PER_RUN
 from src.models import KRERARawProject, RealEstateProject, ScrapeRunSummary
 from src.scrapers.gemini_scraper import GeminiRealEstateScraper
 from src.scrapers.perplexity_scraper import PerplexityRealEstateScraper
@@ -271,7 +271,7 @@ class TestGeocoder(unittest.TestCase):
     def test_budget_exhaustion_returns_none_without_lookup(self):
         with tempfile.TemporaryDirectory() as tmp:
             g = self._geocoder(tmp)
-            g.lookups_used = GEOCODE_MAX_PER_RUN
+            g.lookups_used = g.max_lookups
             called = []
             g._lookup_nominatim = lambda addr: called.append(addr)
             self.assertIsNone(g.geocode_address("Some Uncached Project, Bengaluru"))
@@ -452,6 +452,187 @@ class TestSheetSyncDeduplication(unittest.TestCase):
         )
         new_added, _ = mgr.sync_projects([incoming])
         self.assertEqual(new_added, 1)
+
+
+class TestGeocoderBackendSelection(unittest.TestCase):
+    """Which backend gets picked, and the rule that billing is never implicit."""
+
+    def _resolve(self, **keys):
+        from src import geocoder
+        defaults = {
+            "GEOCODE_BACKEND": "",
+            "LOCATIONIQ_API_KEY": "",
+            "GEOAPIFY_API_KEY": "",
+            "GOOGLE_MAPS_API_KEY": "",
+        }
+        defaults.update(keys)
+        with mock.patch.multiple(geocoder, **defaults):
+            return geocoder.resolve_backend()
+
+    def test_no_keys_falls_back_to_public_nominatim(self):
+        self.assertEqual(self._resolve(), "nominatim")
+
+    def test_locationiq_key_wins(self):
+        self.assertEqual(self._resolve(LOCATIONIQ_API_KEY="k"), "locationiq")
+
+    def test_geoapify_used_when_it_is_the_only_key(self):
+        self.assertEqual(self._resolve(GEOAPIFY_API_KEY="k"), "geoapify")
+
+    def test_free_tier_is_preferred_over_billable_google(self):
+        """A stray Maps key must never silently start billing."""
+        self.assertEqual(
+            self._resolve(GOOGLE_MAPS_API_KEY="g", LOCATIONIQ_API_KEY="l"),
+            "locationiq",
+        )
+        self.assertEqual(
+            self._resolve(GOOGLE_MAPS_API_KEY="g", GEOAPIFY_API_KEY="a"),
+            "geoapify",
+        )
+
+    def test_google_used_when_it_is_the_only_key(self):
+        self.assertEqual(self._resolve(GOOGLE_MAPS_API_KEY="g"), "google")
+
+    def test_explicit_backend_overrides_auto_detection(self):
+        self.assertEqual(
+            self._resolve(GEOCODE_BACKEND="nominatim", LOCATIONIQ_API_KEY="k"),
+            "nominatim",
+        )
+
+    def test_unknown_explicit_backend_falls_back_to_auto(self):
+        self.assertEqual(
+            self._resolve(GEOCODE_BACKEND="mapquest", LOCATIONIQ_API_KEY="k"),
+            "locationiq",
+        )
+
+    def test_backend_sets_its_own_pacing_and_budget(self):
+        from src.geocoder import BACKEND_SETTINGS, Geocoder
+        with tempfile.TemporaryDirectory() as tmp:
+            for name, expected in BACKEND_SETTINGS.items():
+                g = Geocoder(cache_file=Path(tmp) / f"{name}.json", backend=name)
+                self.assertEqual(g.backend, name)
+                self.assertEqual(g.delay, expected["delay"])
+                self.assertEqual(g.max_lookups, int(expected["budget"]))
+
+    def test_free_tier_budget_beats_nominatim_by_an_order_of_magnitude(self):
+        """The whole point of a keyed backend: it can actually drain a backlog."""
+        from src.geocoder import BACKEND_SETTINGS
+        self.assertGreater(
+            BACKEND_SETTINGS["locationiq"]["budget"],
+            BACKEND_SETTINGS["nominatim"]["budget"] * 5,
+        )
+
+
+class TestGeocoderBackendResponses(unittest.TestCase):
+    """Each adapter against its provider's real response shape."""
+
+    def _geocoder(self, tmp, backend, **keys):
+        from src import geocoder
+        with mock.patch.multiple(geocoder, **keys) if keys else _nullcontext():
+            g = geocoder.Geocoder(cache_file=Path(tmp) / "c.json", backend=backend)
+        g.delay = 0  # no need to actually sleep in tests
+        return g
+
+    def _response(self, payload, status=200):
+        resp = mock.MagicMock()
+        resp.status_code = status
+        resp.json.return_value = payload
+        return resp
+
+    def test_locationiq_parses_nominatim_shaped_payload(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            g = self._geocoder(tmp, "locationiq")
+            payload = [{"lat": "12.9401", "lon": "77.7409", "display_name": "..."}]
+            with mock.patch("src.geocoder.requests.get",
+                            return_value=self._response(payload)) as get:
+                self.assertEqual(g.geocode_address("Prestige Park Grove, Bengaluru"),
+                                 (12.9401, 77.7409))
+            self.assertIn("locationiq", get.call_args[0][0])
+            self.assertIn("key", get.call_args[1]["params"])
+
+    def test_geoapify_parses_geojson_payload(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            g = self._geocoder(tmp, "geoapify")
+            payload = {"features": [{"properties": {"lat": 12.9401, "lon": 77.7409}}]}
+            with mock.patch("src.geocoder.requests.get",
+                            return_value=self._response(payload)) as get:
+                self.assertEqual(g.geocode_address("Prestige Park Grove, Bengaluru"),
+                                 (12.9401, 77.7409))
+            self.assertIn("apiKey", get.call_args[1]["params"])
+
+    def test_geoapify_empty_features_is_a_miss(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            g = self._geocoder(tmp, "geoapify")
+            with mock.patch("src.geocoder.requests.get",
+                            return_value=self._response({"features": []})):
+                self.assertIsNone(g.geocode_address("Nowhere At All, Bengaluru"))
+            self.assertEqual(g.misses, 1)
+
+    def test_google_parses_geometry_location(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            g = self._geocoder(tmp, "google")
+            payload = {"status": "OK",
+                       "results": [{"geometry": {"location": {"lat": 12.9401,
+                                                              "lng": 77.7409}}}]}
+            with mock.patch("src.geocoder.requests.get",
+                            return_value=self._response(payload)):
+                self.assertEqual(g.geocode_address("Prestige Park Grove, Bengaluru"),
+                                 (12.9401, 77.7409))
+
+    def test_google_zero_results_is_a_miss(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            g = self._geocoder(tmp, "google")
+            with mock.patch("src.geocoder.requests.get",
+                            return_value=self._response({"status": "ZERO_RESULTS"})):
+                self.assertIsNone(g.geocode_address("Nowhere At All, Bengaluru"))
+
+    def test_malformed_payload_is_a_miss_not_a_crash(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for backend, junk in (
+                ("locationiq", [{"latitude": "12.9"}]),
+                ("geoapify", {"features": [{"properties": {}}]}),
+                ("google", {"status": "OK", "results": []}),
+            ):
+                g = self._geocoder(tmp, backend)
+                with mock.patch("src.geocoder.requests.get",
+                                return_value=self._response(junk)):
+                    self.assertIsNone(
+                        g.geocode_address(f"Junk Response Project {backend}, Bengaluru")
+                    )
+
+    def test_rate_limit_stops_the_run_instead_of_hammering(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            g = self._geocoder(tmp, "locationiq")
+            with mock.patch("src.geocoder.requests.get",
+                            return_value=self._response([], status=429)):
+                self.assertIsNone(g.geocode_address("Anything, Bengaluru"))
+            self.assertEqual(g.budget_remaining, 0)
+
+    def test_transport_error_is_a_miss_not_a_crash(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            g = self._geocoder(tmp, "locationiq")
+            with mock.patch("src.geocoder.requests.get",
+                            side_effect=OSError("connection reset")):
+                self.assertIsNone(g.geocode_address("Anything, Bengaluru"))
+
+    def test_out_of_region_result_is_discarded_for_every_backend(self):
+        """New Delhi coordinates must never be written, whoever returned them."""
+        with tempfile.TemporaryDirectory() as tmp:
+            cases = {
+                "locationiq": [{"lat": "28.6139", "lon": "77.2090"}],
+                "geoapify": {"features": [{"properties": {"lat": 28.6139,
+                                                          "lon": 77.2090}}]},
+                "google": {"status": "OK",
+                           "results": [{"geometry": {"location": {"lat": 28.6139,
+                                                                  "lng": 77.2090}}}]},
+            }
+            for backend, payload in cases.items():
+                g = self._geocoder(tmp, backend)
+                with mock.patch("src.geocoder.requests.get",
+                                return_value=self._response(payload)):
+                    self.assertIsNone(
+                        g.geocode_address(f"Delhi Confusion {backend}, Bengaluru"),
+                        f"{backend} let an out-of-region match through",
+                    )
 
 
 if __name__ == "__main__":
