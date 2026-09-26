@@ -59,6 +59,16 @@ GEOCODE_USER_AGENT = os.getenv(
 GEOCODE_MAX_PER_RUN = int(os.getenv("GEOCODE_MAX_PER_RUN", "0"))
 GEOCODE_CACHE_FILE = Path(os.getenv("GEOCODE_CACHE_FILE", str(ROOT_DIR / "src" / "data" / "geocode_cache.json")))
 
+# Wall-clock ceiling for the geocoding stage, in seconds. The GitHub Actions job
+# is capped at 90 minutes; stopping well inside that leaves room to write results
+# and finish the run. A run that is killed mid-stage loses whatever it has not
+# written, so this matters more than the lookup count.
+GEOCODE_TIME_BUDGET_SECONDS = int(os.getenv("GEOCODE_TIME_BUDGET_SECONDS", "3000"))
+
+# Write coordinates to the sheet every N rows instead of once at the end, so a
+# timeout or crash costs at most this many lookups.
+GEOCODE_FLUSH_EVERY = int(os.getenv("GEOCODE_FLUSH_EVERY", "250"))
+
 # --- Google Sheet Sharing ---
 # Comma-separated Gmail / Workspace addresses granted access after each run.
 SHARE_WITH_EMAILS = [

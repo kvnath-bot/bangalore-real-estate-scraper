@@ -24,6 +24,7 @@ if str(ROOT_DIR) not in sys.path:
 from src.config import (
     GEMINI_API_KEY,
     GEOCODE_ENABLED,
+    GEOCODE_FLUSH_EVERY,
     GOOGLE_SHEET_NAME,
     PERPLEXITY_API_KEY,
     SEARCH_STRATEGY,
@@ -70,10 +71,12 @@ def run_geocoding_stage(gsheet: GoogleSheetManager) -> int:
 
     geocoder = Geocoder()
     row_values = {}
+    written_total = 0
     attempted = 0
     in_region = 0
     out_of_region = 0
     build_errors = 0
+    remaining_skipped = 0
 
     for entry in pending:
         try:
@@ -97,6 +100,14 @@ def run_geocoding_stage(gsheet: GoogleSheetManager) -> int:
             in_region += 1
         else:
             out_of_region += 1
+            continue  # out of scope: no lookup, no row written
+
+        # Once the budget or the clock is spent, the remaining rows would only
+        # receive a name-search link. Leave them untouched so they are retried
+        # rather than looking done.
+        if geocoder.budget_remaining <= 0:
+            remaining_skipped += 1
+            continue
 
         latitude = ""
         longitude = ""
@@ -112,12 +123,13 @@ def run_geocoding_stage(gsheet: GoogleSheetManager) -> int:
         raw.longitude = longitude
         link = raw.build_map_pin_link()
 
-        # Skip rows where nothing useful changed: no coordinates found and the
-        # row already carries a search link from a previous run.
-        if not latitude and not raw.is_bangalore_region():
-            continue
-
         row_values[entry["row"]] = [latitude, longitude, link]
+
+        # Flush periodically. A run cancelled by the job timeout keeps whatever
+        # has already been written, instead of discarding the whole stage.
+        if len(row_values) >= GEOCODE_FLUSH_EVERY:
+            written_total += gsheet.update_krera_map_columns(row_values)
+            row_values = {}
 
         if attempted and attempted % 50 == 0:
             logger.info(
@@ -126,17 +138,15 @@ def run_geocoding_stage(gsheet: GoogleSheetManager) -> int:
                 f"{geocoder.budget_remaining} of this run's budget left)."
             )
 
+    if row_values:
+        written_total += gsheet.update_krera_map_columns(row_values)
+
     geocoder.save_cache()
     logger.info(
         f"[Geocoder] Rows examined: {len(pending)} | Bangalore-region: {in_region} "
         f"| out of scope (skipped): {out_of_region} | unparseable: {build_errors} "
-        f"| rows queued for writing: {len(row_values)}"
+        f"| left for a later run: {remaining_skipped} | rows written: {written_total}"
     )
-    if in_region != len(row_values):
-        logger.warning(
-            f"[Geocoder] Expected to write one row per Bangalore-region row "
-            f"({in_region}) but queued {len(row_values)}. These should match."
-        )
     logger.info(
         f"[Geocoder] Lookups this run: {geocoder.lookups_used}/{geocoder.max_lookups} "
         f"via '{geocoder.backend}' "
@@ -144,7 +154,7 @@ def run_geocoding_stage(gsheet: GoogleSheetManager) -> int:
         f"| Bangalore-region rows still without coordinates: {max(0, in_region - geocoder.hits)}"
     )
 
-    return gsheet.update_krera_map_columns(row_values)
+    return written_total
 
 
 def run_pipeline() -> dict:
