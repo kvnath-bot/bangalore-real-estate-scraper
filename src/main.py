@@ -58,6 +58,11 @@ def run_geocoding_stage(gsheet: GoogleSheetManager) -> int:
     Lookups are capped at GEOCODE_MAX_PER_RUN per run and cached on disk, so a
     large backlog drains over consecutive daily runs instead of one long job.
     """
+    # Repair stale District values before deciding what is in scope. Rows the
+    # registry mislabelled as "Other Karnataka" are Bengaluru Urban, and until
+    # column E is corrected they look out of scope to every later step.
+    gsheet.backfill_krera_districts()
+
     pending = gsheet.get_krera_rows_needing_coordinates()
     if not pending:
         logger.info("[Geocoder] Every row already has coordinates. Nothing to do.")
@@ -76,7 +81,9 @@ def run_geocoding_stage(gsheet: GoogleSheetManager) -> int:
                 rera_number=entry["rera_number"],
                 project_name=entry["project_name"] or entry["rera_number"],
                 promoter_name="",
-                district=entry["district"] or KRERARawProject.get_district_from_rera(entry["rera_number"]),
+                # KRERARawProject derives the district from the RERA number, so a
+                # stale sheet value cannot put a Bengaluru project out of scope.
+                district=entry["district"] or "Other Karnataka",
             )
         except Exception as e:
             # Previously an unparseable row would abort the whole stage silently
