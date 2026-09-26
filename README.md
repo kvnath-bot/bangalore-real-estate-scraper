@@ -85,12 +85,31 @@ plotted on a map:
 
 **How geocoding works**
 
-- Only **Bengaluru-region** districts are geocoded; the rest of Karnataka is out of scope.
-- Default backend is **Nominatim / OpenStreetMap** — free, no API key, capped by its usage policy at ~1 request/second. Set `GOOGLE_MAPS_API_KEY` to switch to the Google Geocoding API instead (much faster, billable).
+- Only **Bengaluru-region** districts are geocoded; the rest of Karnataka is out of scope. That's **5,554** of the 8,943 registrations.
+- The backend is **auto-detected** from whichever API key is present, so switching providers is a secret change and nothing else:
+
+| Backend | Key needed | Credit card | Free allowance | Use when |
+|---|---|---|---|---|
+| **LocationIQ** | yes | **no** | ~5k/day | Working through the backlog — **recommended** |
+| **Geoapify** | yes | **no** | ~3k/day | Same, alternative provider |
+| **Google** | yes | **yes** | — | You already have billing enabled |
+| **Nominatim** | no | no | — | Default; small top-ups only (see below) |
+
+- ⚠️ **Nominatim is the public OpenStreetMap endpoint.** It's donated infrastructure and its usage policy **forbids bulk geocoding**, so its per-run budget is deliberately held at 400. Don't raise it to grind through thousands of rows — use a free-tier key instead, or point `NOMINATIM_ENDPOINT` at your own instance where no such limit applies.
+- Free tiers are preferred over Google in the auto-detection order, so a stray Maps key can never silently start billing. Force a specific one with `GEOCODE_BACKEND=locationiq|geoapify|google|nominatim`.
 - Matches resolving outside the Bengaluru metropolitan bounding box are discarded rather than written, so a same-named project in another state never produces a wrong pin.
-- Each run spends at most `GEOCODE_MAX_PER_RUN` lookups (default `400`). Rows that already have coordinates are skipped, so a large backlog drains over consecutive daily runs — the sheet itself is the source of truth for what is done.
+- Each run spends at most `GEOCODE_MAX_PER_RUN` lookups. `0` (the default) means *use the chosen backend's own ceiling*, so you don't have to retune it when switching providers. Rows that already have coordinates are skipped, so a large backlog drains over consecutive runs — the sheet itself is the source of truth for what is done.
+- A `429` from any provider **ends that run's geocoding** rather than hammering a limited endpoint; the remaining rows are picked up next time.
 - Registrations that cannot be resolved by name keep an empty Latitude/Longitude and are retried on later runs.
 - To turn the whole stage off: `GEOCODE_ENABLED=false`.
+
+**Clearing the 5,554-row backlog without any billing**
+
+1. Sign up at [locationiq.com/register](https://locationiq.com/register) — email only, no card.
+2. Add the token as the `LOCATIONIQ_API_KEY` repo secret (or put it in `.env` locally).
+3. That's it. The next run switches backend automatically and works through ~4,500 rows, finishing the rest the following day.
+
+Verify the provider's current published free limit before raising `GEOCODE_MAX_PER_RUN` beyond the built-in ceiling — these allowances change.
 
 To plot the sheet, use **Google Sheets → Insert → Chart → Map**, or import the
 Latitude/Longitude columns into Google My Maps / Looker Studio.

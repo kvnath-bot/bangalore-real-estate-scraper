@@ -17,7 +17,7 @@ jobs:
   scrape-and-sync:
     name: Scrape Bangalore Projects & Sync to GSheet
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 90
 
     steps:
       - name: Checkout Code
@@ -42,9 +42,14 @@ jobs:
           GOOGLE_SHEET_NAME: ${{ secrets.GOOGLE_SHEET_NAME || 'Bangalore Real Estate Projects Tracker' }}
           SEARCH_STRATEGY: ${{ github.event.inputs.search_strategy || secrets.SEARCH_STRATEGY || 'hybrid' }}
           SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
-          # Geocoding: leave GOOGLE_MAPS_API_KEY unset to use the free Nominatim backend.
+          # Geocoding. Backend is auto-detected from whichever key is present:
+          # LocationIQ / Geoapify (free, no card) > Google (billable) > public Nominatim.
           GEOCODE_ENABLED: ${{ vars.GEOCODE_ENABLED || 'true' }}
-          GEOCODE_MAX_PER_RUN: ${{ vars.GEOCODE_MAX_PER_RUN || '400' }}
+          # Blank/0 means "use the chosen backend's own ceiling".
+          GEOCODE_MAX_PER_RUN: ${{ vars.GEOCODE_MAX_PER_RUN || '0' }}
+          GEOCODE_BACKEND: ${{ vars.GEOCODE_BACKEND }}
+          LOCATIONIQ_API_KEY: ${{ secrets.LOCATIONIQ_API_KEY }}
+          GEOAPIFY_API_KEY: ${{ secrets.GEOAPIFY_API_KEY }}
           GOOGLE_MAPS_API_KEY: ${{ secrets.GOOGLE_MAPS_API_KEY }}
           # Sheet sharing: comma-separated Gmail / Workspace addresses.
           SHARE_WITH_EMAILS: ${{ secrets.SHARE_WITH_EMAILS }}
