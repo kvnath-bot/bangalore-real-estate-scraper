@@ -37,6 +37,7 @@ import requests
 from src.config import (
     GEOAPIFY_API_KEY,
     GEOCODE_BACKEND,
+    GEOCODE_TIME_BUDGET_SECONDS,
     GEOCODE_CACHE_FILE,
     GEOCODE_ENABLED,
     GEOCODE_MAX_PER_RUN,
@@ -122,6 +123,8 @@ class Geocoder:
         self.hits = 0
         self.misses = 0
         self.aborted = False
+        self.deadline = time.monotonic() + GEOCODE_TIME_BUDGET_SECONDS
+        self.timed_out = False
 
         self.backend = backend or resolve_backend()
         settings = BACKEND_SETTINGS.get(self.backend, BACKEND_SETTINGS[BACKEND_NOMINATIM])
@@ -176,9 +179,30 @@ class Geocoder:
 
     @property
     def budget_remaining(self) -> int:
-        if self.aborted:
+        if self.aborted or self.out_of_time:
             return 0
         return max(0, self.max_lookups - self.lookups_used)
+
+    @property
+    def out_of_time(self) -> bool:
+        """
+        True once the stage has used its wall-clock budget.
+
+        A run killed by the job timeout loses every lookup it has not written -
+        one live run spent 89 minutes and ~4,500 lookups, then was cancelled
+        before the write. Stopping ourselves, early enough to write, is the
+        difference between slow progress and none.
+        """
+        if self.deadline and time.monotonic() > self.deadline:
+            if not self.timed_out:
+                self.timed_out = True
+                logger.warning(
+                    f"[Geocoder] Wall-clock budget of {GEOCODE_TIME_BUDGET_SECONDS}s "
+                    f"reached after {self.lookups_used} lookups. Stopping so results "
+                    f"can be written; the rest resume next run."
+                )
+            return True
+        return False
 
     def _abort(self, reason: str):
         """
