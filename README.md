@@ -115,6 +115,55 @@ the others.
 
 ---
 
+## 🧹 Cleaning Up Existing Duplicate Rows
+
+Rows written *before* the deduplication fix can still be duplicated: the old
+keying identified a project by **either** its RERA number **or** its
+name + builder, never both, so the same project discovered once with a
+registration number and once without became two rows. The pipeline no longer
+does this, but historical rows need a one-off pass.
+
+```bash
+# 1. Dry run — reads only, writes nothing, prints exactly what would change
+python scripts/dedupe_sheet.py
+
+# 2. Apply it
+python scripts/dedupe_sheet.py --apply
+```
+
+Safety properties:
+
+- **Dry run is the default.** Nothing is merged or deleted without `--apply`.
+- **A timestamped JSON backup** of every row is written to `backups/` before anything is touched (`--no-backup` is refused together with `--apply`).
+- **Merging reuses `RealEstateAggregator._deduplicate_and_merge`** — the same code the live pipeline runs — so the cleanup cannot drift from pipeline behaviour.
+- **The earliest row survives**, preserving its original *First Discovered* date; the cluster's latest *Last Updated* is kept.
+- The survivor **absorbs the richer values** from the rows being removed: a real RERA number over a placeholder, a real price over `On Request`, a real possession date over `TBA`, the longest amenities string, and a portal URL over none.
+- Rows are deleted **bottom-up in contiguous blocks**, so earlier deletions never shift later row indices.
+- Any cluster that does not collapse to exactly one record is **reported and skipped** rather than guessed at.
+- Re-running is a **no-op** once the sheet is clean.
+
+Sample dry-run output:
+
+```
+[Godrej Athena]
+  keep   row 2
+  remove row 4
+  remove row 6
+  survivor gains:
+    - price_range: 'On Request' -> '2.5 Cr onwards'
+    - rera_number: 'Pending' -> 'PRM/KA/RERA/1251/310/PR/230123/005655'
+    - possession_date: 'TBA' -> 'Dec 2028'
+```
+
+The raw K-RERA registry can be cleaned the same way, matched on exact
+registration number instead:
+
+```bash
+python scripts/dedupe_sheet.py --worksheet KRERA_Raw_Projects
+```
+
+---
+
 ## 🚀 Quickstart: Automated Setup with GitHub Actions (Recommended)
 
 ### Step 1: Clone or Push this Repo to GitHub
@@ -205,6 +254,8 @@ schedule:
 │   │   ├── krera_scraper.py           # Karnataka RERA validator
 │   │   └── aggregator.py              # Multi-zone scan & merge
 │   └── main.py                        # Pipeline entrypoint
+├── scripts/
+│   └── dedupe_sheet.py                # One-off duplicate-row cleanup
 ├── app.py                             # FastAPI webhook trigger for Render
 ├── render.yaml                        # Render blueprint deployment
 ├── setup_google_sheets.md             # Free Google Service Account guide

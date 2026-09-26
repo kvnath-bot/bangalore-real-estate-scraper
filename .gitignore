@@ -10,6 +10,9 @@ service_account*.json
 # Local geocode cache (the Google Sheet is the source of truth for coordinates)
 src/data/geocode_cache.json
 
+# Sheet backups written by scripts/dedupe_sheet.py (contain live sheet data)
+backups/
+
 # Python
 __pycache__/
 *.py[cod]
