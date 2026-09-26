@@ -634,6 +634,62 @@ class TestGeocoderBackendResponses(unittest.TestCase):
                         f"{backend} let an out-of-region match through",
                     )
 
+    def test_google_request_denied_aborts_instead_of_retrying_forever(self):
+        """The live-run failure: a key without billing denied every single call."""
+        with tempfile.TemporaryDirectory() as tmp:
+            g = self._geocoder(tmp, "google")
+            payload = {"status": "REQUEST_DENIED",
+                       "error_message": "This API project is not authorized."}
+            with mock.patch("src.geocoder.requests.get",
+                            return_value=self._response(payload)) as get:
+                self.assertIsNone(g.geocode_address("First Project, Bengaluru"))
+                self.assertIsNone(g.geocode_address("Second Project, Bengaluru"))
+                self.assertIsNone(g.geocode_address("Third Project, Bengaluru"))
+            # One request, then it gives up - not one per row.
+            self.assertEqual(get.call_count, 1)
+            self.assertTrue(g.aborted)
+            self.assertEqual(g.budget_remaining, 0)
+
+    def test_over_query_limit_aborts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            g = self._geocoder(tmp, "google")
+            with mock.patch("src.geocoder.requests.get",
+                            return_value=self._response({"status": "OVER_QUERY_LIMIT"})):
+                self.assertIsNone(g.geocode_address("Anything, Bengaluru"))
+            self.assertTrue(g.aborted)
+
+    def test_rejected_key_aborts_for_keyed_providers(self):
+        for backend, status in (("locationiq", 401), ("geoapify", 403)):
+            with tempfile.TemporaryDirectory() as tmp:
+                g = self._geocoder(tmp, backend)
+                with mock.patch("src.geocoder.requests.get",
+                                return_value=self._response({}, status=status)) as get:
+                    self.assertIsNone(g.geocode_address("One, Bengaluru"))
+                    self.assertIsNone(g.geocode_address("Two, Bengaluru"))
+                self.assertEqual(get.call_count, 1, f"{backend} kept retrying a dead key")
+                self.assertTrue(g.aborted)
+
+    def test_abort_does_not_poison_the_cache_with_false_misses(self):
+        """
+        A denied key must not be recorded as "this project has no coordinates",
+        or the rows would be permanently skipped once the key is fixed.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            g = self._geocoder(tmp, "google")
+            with mock.patch("src.geocoder.requests.get",
+                            return_value=self._response({"status": "REQUEST_DENIED"})):
+                g.geocode_address("Recoverable Project, Bengaluru")
+            self.assertNotIn("recoverable project, bengaluru", g.cache)
+
+    def test_ordinary_miss_is_still_cached(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            g = self._geocoder(tmp, "google")
+            with mock.patch("src.geocoder.requests.get",
+                            return_value=self._response({"status": "ZERO_RESULTS"})):
+                g.geocode_address("Genuinely Unknown, Bengaluru")
+            self.assertIn("genuinely unknown, bengaluru", g.cache)
+            self.assertIsNone(g.cache["genuinely unknown, bengaluru"])
+
 
 if __name__ == "__main__":
     unittest.main()
