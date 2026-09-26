@@ -3,6 +3,7 @@ Test suite for Bangalore Real Estate Scraper components.
 Tests data models, deduplication logic, JSON parsing, and sheet formatting.
 """
 
+import logging
 import tempfile
 import unittest
 from contextlib import nullcontext as _nullcontext
@@ -599,13 +600,64 @@ class TestGeocoderBackendResponses(unittest.TestCase):
                         g.geocode_address(f"Junk Response Project {backend}, Bengaluru")
                     )
 
-    def test_rate_limit_stops_the_run_instead_of_hammering(self):
+    def test_transient_rate_limit_is_retried_with_backoff(self):
+        """
+        A bare 429 means "slow down", not "you are out of quota". A live run
+        treated the two as identical and threw away 4,421 of 4,500 lookups.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            g = self._geocoder(tmp, "locationiq")
+            ok = self._response([{"lat": "12.9401", "lon": "77.7409"}])
+            limited = self._response({}, status=429)
+            with mock.patch("src.geocoder.RATE_LIMIT_BACKOFF_SECONDS", [0, 0, 0]),                  mock.patch("src.geocoder.requests.get",
+                            side_effect=[limited, limited, ok]) as get:
+                self.assertEqual(g.geocode_address("Prestige Park Grove, Bengaluru"),
+                                 (12.9401, 77.7409))
+            self.assertEqual(get.call_count, 3)
+            self.assertFalse(g.aborted, "a transient 429 must not end the run")
+
+    def test_persistent_rate_limit_eventually_aborts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            g = self._geocoder(tmp, "locationiq")
+            with mock.patch("src.geocoder.RATE_LIMIT_BACKOFF_SECONDS", [0, 0, 0]),                  mock.patch("src.geocoder.requests.get",
+                            return_value=self._response({}, status=429)) as get:
+                self.assertIsNone(g.geocode_address("Anything, Bengaluru"))
+            self.assertEqual(get.call_count, 4)  # initial + 3 retries
+            self.assertTrue(g.aborted)
+            self.assertEqual(g.budget_remaining, 0)
+
+    def test_daily_quota_429_aborts_without_retrying(self):
+        """Backing off cannot fix a day limit, so don't waste time on it."""
+        with tempfile.TemporaryDirectory() as tmp:
+            g = self._geocoder(tmp, "locationiq")
+            resp = self._response({}, status=429)
+            resp.text = '{"error":"Rate Limited Day"}'
+            with mock.patch("src.geocoder.RATE_LIMIT_BACKOFF_SECONDS", [0, 0, 0]),                  mock.patch("src.geocoder.requests.get", return_value=resp) as get:
+                self.assertIsNone(g.geocode_address("Anything, Bengaluru"))
+            self.assertEqual(get.call_count, 1)
+            self.assertTrue(g.aborted)
+
+    def test_404_is_a_quiet_miss_not_an_error(self):
+        """LocationIQ answers 404 for "nothing matched"; 23 of these were logged
+        as warnings on a live run, drowning out the real failure."""
         with tempfile.TemporaryDirectory() as tmp:
             g = self._geocoder(tmp, "locationiq")
             with mock.patch("src.geocoder.requests.get",
-                            return_value=self._response([], status=429)):
-                self.assertIsNone(g.geocode_address("Anything, Bengaluru"))
-            self.assertEqual(g.budget_remaining, 0)
+                            return_value=self._response({}, status=404)):
+                with self.assertLogs("geocoder", level="WARNING") as captured:
+                    logging.getLogger("geocoder").warning("sentinel")
+                    self.assertIsNone(g.geocode_address("No Such Place, Bengaluru"))
+            self.assertEqual(
+                [m for m in captured.output if "sentinel" not in m], [],
+                "a 404 should not produce a warning",
+            )
+            self.assertFalse(g.aborted)
+            self.assertEqual(g.misses, 1)
+
+    def test_locationiq_paces_at_one_request_per_second(self):
+        """The 0.55s pacing that triggered the live 429 must not come back."""
+        from src.geocoder import BACKEND_SETTINGS
+        self.assertGreaterEqual(BACKEND_SETTINGS["locationiq"]["delay"], 1.0)
 
     def test_transport_error_is_a_miss_not_a_crash(self):
         with tempfile.TemporaryDirectory() as tmp:
