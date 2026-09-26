@@ -34,6 +34,7 @@ class KRERARawProject(BaseModel):
     latitude: str = Field(default="", description="Geocoded latitude of the project (blank when unresolved)")
     longitude: str = Field(default="", description="Geocoded longitude of the project (blank when unresolved)")
     map_pin_link: str = Field(default="", description="Google Maps link - a coordinate pin when geocoded, else a name search")
+    geocode_status: str = Field(default="", description="What the geocoder last did with this row and when, e.g. 'unresolved 2026-09-26'")
 
     @model_validator(mode="after")
     def _derive_district(self):
@@ -169,6 +170,7 @@ class KRERARawProject(BaseModel):
             self.latitude,
             self.longitude,
             self.map_pin_link or self.build_map_pin_link(),
+            self.geocode_status,
         ]
 
     @classmethod
@@ -186,6 +188,7 @@ class KRERARawProject(BaseModel):
             "Latitude",
             "Longitude",
             "Map Pin Link",
+            "Geocode Status",
         ]
 
 

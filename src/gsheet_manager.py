@@ -7,13 +7,16 @@ batch appending, status updates, and daily execution logging with Google Sheets 
 import json
 import logging
 import os
+import re
 import time
+from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Set, Tuple
 import gspread
 from google.oauth2.service_account import Credentials
 from src.config import (
     GCP_SERVICE_ACCOUNT_FILE,
     GCP_SERVICE_ACCOUNT_KEY,
+    GEOCODE_RETRY_COOLDOWN_DAYS,
     GOOGLE_SHEET_NAME,
     SHARE_NOTIFY,
     SHARE_ROLE,
@@ -35,12 +38,26 @@ LOGS_WORKSHEET_NAME = "Scrape_Run_Logs"
 MAP_PINS_WORKSHEET_NAME = "Map_Pins"
 BATCH_CHUNK_SIZE = 1000
 
-# Columns J, K, L of KRERA_Raw_Projects hold Latitude / Longitude / Map Pin Link.
+# Columns J:M of KRERA_Raw_Projects hold Latitude / Longitude / Map Pin Link /
+# Geocode Status.
 MAP_COL_START = "J"
-MAP_COL_END = "L"
+MAP_COL_END = "M"
+
+_STATUS_DATE = re.compile(r"(\d{4}-\d{2}-\d{2})")
 
 # Column E of KRERA_Raw_Projects holds District / Region.
 DISTRICT_COL = "E"
+
+
+def _parse_status_date(status: str):
+    """Pulls the YYYY-MM-DD out of a Geocode Status cell, or None."""
+    match = _STATUS_DATE.search(status or "")
+    if not match:
+        return None
+    try:
+        return datetime.strptime(match.group(1), "%Y-%m-%d")
+    except ValueError:
+        return None
 
 
 class GoogleSheetManager:
@@ -302,6 +319,9 @@ class GoogleSheetManager:
             return []
 
         pending: List[Dict[str, str]] = []
+        deferred = 0
+        never_tried = 0
+        cutoff = datetime.now() - timedelta(days=GEOCODE_RETRY_COOLDOWN_DAYS)
         for idx, row in enumerate(all_rows[1:], start=2):
             if not row or not row[0].strip():
                 continue
@@ -309,12 +329,42 @@ class GoogleSheetManager:
             longitude = row[10].strip() if len(row) > 10 else ""
             if latitude and longitude:
                 continue
+
+            # Has this row been tried before, and when? Column M carries a dated
+            # status once a run has looked at the row. Rows written before that
+            # column existed have a name-search link in L but no status: tried,
+            # date unknown, so eligible for one retry but queued behind the
+            # never-tried rows.
+            link = row[11].strip() if len(row) > 11 else ""
+            status = row[12].strip() if len(row) > 12 else ""
+            attempted_on = _parse_status_date(status)
+            tried = bool(status) or bool(link)
+
+            if attempted_on and attempted_on > cutoff:
+                deferred += 1
+                continue
+            if not tried:
+                never_tried += 1
+
             pending.append({
                 "row": idx,
                 "rera_number": row[0].strip(),
                 "project_name": row[1].strip() if len(row) > 1 else "",
                 "district": row[4].strip() if len(row) > 4 else "",
+                "tried": tried,
+                "attempted_on": attempted_on.strftime("%Y-%m-%d") if attempted_on else "",
             })
+
+        # Never-tried rows first, then the stalest failures. Without this, every
+        # run re-spent its opening lookups on the same known misses at the top
+        # of the sheet before reaching anything new - a 60-lookup test run
+        # resolved 0 of 60 for exactly that reason.
+        pending.sort(key=lambda e: (1 if e["tried"] else 0, e["attempted_on"] or ""))
+        logger.info(
+            f"[GSheet Manager] Geocode queue: {never_tried} never tried, "
+            f"{len(pending) - never_tried} eligible for retry, "
+            f"{deferred} deferred (tried within {GEOCODE_RETRY_COOLDOWN_DAYS} days)."
+        )
         # A district histogram, because "8943 rows need coordinates" hid the fact
         # that only a fraction were recognised as Bangalore-region and written.
         histogram: Dict[str, int] = {}
@@ -330,10 +380,11 @@ class GoogleSheetManager:
 
     def update_krera_map_columns(self, row_values: Dict[int, List[str]]) -> int:
         """
-        Batch writes Latitude / Longitude / Map Pin Link (columns J:L) for the
-        given sheet rows.
+        Batch writes Latitude / Longitude / Map Pin Link / Geocode Status
+        (columns J:M) for the given sheet rows.
 
-        row_values maps a 1-based sheet row number to [latitude, longitude, link].
+        row_values maps a 1-based sheet row number to
+        [latitude, longitude, link, status].
         """
         return self._write_column_blocks(MAP_COL_START, MAP_COL_END, row_values, "coordinates and map pins")
 

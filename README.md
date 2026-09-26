@@ -82,6 +82,7 @@ plotted on a map:
 | J | **Latitude** | Geocoded latitude, blank when the project could not be resolved |
 | K | **Longitude** | Geocoded longitude, blank when the project could not be resolved |
 | L | **Map Pin Link** | Google Maps link — an exact coordinate pin when geocoded, otherwise a name search so the cell is never dead |
+| M | **Geocode Status** | What the geocoder last did with the row and when: `resolved via locationiq 2026-09-26` or `unresolved 2026-09-26` |
 
 **How geocoding works**
 
@@ -100,6 +101,7 @@ plotted on a map:
 - Matches resolving outside the Bengaluru metropolitan bounding box are discarded rather than written, so a same-named project in another state never produces a wrong pin.
 - Each run spends at most `GEOCODE_MAX_PER_RUN` lookups. `0` (the default) means *use the chosen backend's own ceiling*, so you don't have to retune it when switching providers. Rows that already have coordinates are skipped, so a large backlog drains over consecutive runs — the sheet itself is the source of truth for what is done.
 - A `429` from any provider **ends that run's geocoding** rather than hammering a limited endpoint; the remaining rows are picked up next time.
+- **Never-tried rows go first.** Every free provider reads the same OpenStreetMap data, so re-asking about a known miss tomorrow gets the same answer. Column M records each attempt; a row that failed is retried only after `GEOCODE_RETRY_COOLDOWN_DAYS` (default 30), stalest first, and only once every never-tried row has had its turn. The log's `Geocode queue:` line shows the split.
 - Each project is tried under up to **three phrasings** before it counts as a miss: the registered name, the name with phase/wing/block noise stripped (`GODREJ FLORENNE PHASE II` → `GODREJ FLORENNE`, which 17.4% of names need), and the cleaned name with a plain `Bengaluru` qualifier. Later variants cost a lookup each; the run log reports `name variants rescued N` so you can see whether they earn it.
 - Registrations that cannot be resolved by name keep an empty Latitude/Longitude and are retried on later runs.
 - To turn the whole stage off: `GEOCODE_ENABLED=false`.
