@@ -545,6 +545,15 @@ class GoogleSheetManager:
         logger.info(f"[GSheet Manager] Writing {len(pins)} located projects to '{MAP_PINS_WORKSHEET_NAME}'...")
         sheet.update(range_name="A1", values=[headers] + pins, value_input_option="USER_ENTERED")
         self._format_header_row(sheet)
+
+        # Google My Maps imports the FIRST tab of a spreadsheet and offers no
+        # reliable way to pick another, so keep Map_Pins in front.
+        try:
+            if sheet.index != 0:
+                sheet.update_index(0)
+        except Exception as e:
+            logger.warning(f"Could not move '{MAP_PINS_WORKSHEET_NAME}' to the first tab: {e}")
+
         logger.info(f"[GSheet Manager] Map_Pins refreshed with {len(pins)} pins.")
         return len(pins)
 

@@ -123,7 +123,30 @@ Step 3 is required: free-tier providers outrank Google in auto-detection precise
 
 Verify the provider's current published free limit before raising `GEOCODE_MAX_PER_RUN` beyond the built-in ceiling — these allowances change.
 
-### The `Map_Pins` tab — what agents actually use
+### The live map — share this link
+
+After every run the workflow exports every located project and publishes a map
+page to GitHub Pages:
+
+**https://kvnath-bot.github.io/bangalore-real-estate-scraper/**
+
+It refreshes itself. No reimport, no row cap, nothing for anyone to do. Share
+the link with agents; it needs no login. What it does:
+
+- Every pin is a project with a **confirmed** location; unresolved projects are
+  counted in the header but never drawn.
+- **Search** by project, promoter or RERA number; toggle districts on and off.
+- **Within a radius**: pick a centre on the map, set 1–15 km, and the list sorts
+  nearest first with distances — the "what's near X?" question, answered in
+  seconds.
+- Every popup has the RERA number and an **Open in Google Maps** link.
+- Light and dark themes follow the viewer's device.
+
+The first deploy needs GitHub Pages switched on once: it happens automatically on
+the first run after merging, or set *Settings → Pages → Source: GitHub Actions*
+if the deploy job reports it could not enable Pages.
+
+### The `Map_Pins` tab — for Google My Maps
 
 Every run rebuilds a **`Map_Pins`** worksheet containing only the projects that have
 real coordinates, with `Project Name · Promoter · District · Latitude · Longitude ·
@@ -299,7 +322,10 @@ schedule:
 │   │   └── aggregator.py              # Multi-zone scan & merge
 │   └── main.py                        # Pipeline entrypoint
 ├── scripts/
-│   └── dedupe_sheet.py                # One-off duplicate-row cleanup
+│   ├── dedupe_sheet.py                # One-off duplicate-row cleanup
+│   └── export_map_pins.py             # GeoJSON for the map page (run by the workflow)
+├── site/
+│   └── index.html                     # The live map (GitHub Pages)
 ├── app.py                             # FastAPI webhook trigger for Render
 ├── render.yaml                        # Render blueprint deployment
 ├── setup_google_sheets.md             # Free Google Service Account guide

@@ -13,6 +13,17 @@ on:
         required: false
         default: 'hybrid'
 
+# The run publishes the map to GitHub Pages, which needs these three.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Never let two deploys race; queue them instead.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
 jobs:
   scrape-and-sync:
     name: Scrape Bangalore Projects & Sync to GSheet
@@ -66,3 +77,35 @@ jobs:
           name: bangalore-real-estate-snapshot-${{ github.run_id }}
           path: scraped_projects_latest.json
           retention-days: 14
+
+      - name: Export located projects for the map
+        env:
+          GCP_SERVICE_ACCOUNT_KEY: ${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}
+          GOOGLE_SHEET_NAME: ${{ secrets.GOOGLE_SHEET_NAME || 'Bangalore Real Estate Projects Tracker' }}
+          SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
+        run: |
+          python scripts/export_map_pins.py --out site/pins.geojson
+
+      - name: Package the map for GitHub Pages
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  # Publishes site/ (the map page + pins.geojson) to the repo's GitHub Pages
+  # URL after every run, so the map refreshes itself with no manual reimport.
+  deploy-map:
+    name: Deploy map to GitHub Pages
+    needs: scrape-and-sync
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+        with:
+          enablement: true
+
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v4

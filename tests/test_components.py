@@ -950,6 +950,23 @@ class TestMapPinsExport(unittest.TestCase):
         self.assertEqual(first[3:5], ["12.940100", "77.740900"])
         self.assertEqual(first[5], "R1")
 
+    def test_map_pins_is_moved_to_the_first_tab(self):
+        """Google My Maps imports the first sheet, so Map_Pins must be first."""
+        rows = [KRERARawProject.sheet_headers(),
+                self._row("R1", "Located One", "Bengaluru Urban", "12.94", "77.74")]
+        mgr = self._manager(rows)
+        mgr.pins_sheet.index = 3
+        mgr.export_map_pins()
+        mgr.pins_sheet.update_index.assert_called_once_with(0)
+
+    def test_map_pins_already_first_is_left_alone(self):
+        rows = [KRERARawProject.sheet_headers(),
+                self._row("R1", "Located One", "Bengaluru Urban", "12.94", "77.74")]
+        mgr = self._manager(rows)
+        mgr.pins_sheet.index = 0
+        mgr.export_map_pins()
+        mgr.pins_sheet.update_index.assert_not_called()
+
     def test_existing_tab_is_cleared_before_rewrite(self):
         """Otherwise a shrinking export would leave stale pins behind."""
         rows = [KRERARawProject.sheet_headers(),

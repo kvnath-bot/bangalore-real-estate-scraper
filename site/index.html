@@ -1,0 +1,413 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Bengaluru RERA Map</title>
+<meta name="description" content="Every Karnataka RERA registration in the Bengaluru region with a confirmed location, on one map. Refreshed by the tracker after every run.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.markercluster/1.5.3/MarkerCluster.min.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.markercluster/1.5.3/MarkerCluster.Default.min.css">
+<style>
+  :root {
+    --ground: #F1F4F2;
+    --surface: #FFFFFF;
+    --surface-2: #E8EDEA;
+    --ink: #16232B;
+    --muted: #5E6E76;
+    --line: #D6DDDA;
+    --accent: #0E6E62;
+    --accent-ink: #FFFFFF;
+    --focus: #2A66B3;
+    --d-urban: #0E6E62;
+    --d-rural: #B8621B;
+    --d-ramanagara: #6D4AA8;
+    --d-chikka: #2A66B3;
+    --d-other: #6B7A82;
+    --radius-fill: rgba(14, 110, 98, 0.10);
+    --shadow: 0 1px 2px rgba(22, 35, 43, 0.08), 0 8px 24px rgba(22, 35, 43, 0.08);
+    --tile-filter: none;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground: #0F1619; --surface: #16222A; --surface-2: #1E2C34;
+      --ink: #E4EAEC; --muted: #97A6AE; --line: #2A3A42;
+      --accent: #3FB7A5; --accent-ink: #0B1B18; --focus: #6FA1E8;
+      --d-urban: #3FB7A5; --d-rural: #E39A55; --d-ramanagara: #A88BE0; --d-chikka: #6FA1E8; --d-other: #8FA0A8;
+      --radius-fill: rgba(63, 183, 165, 0.14);
+      --shadow: 0 1px 2px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.4);
+      --tile-filter: invert(1) hue-rotate(180deg) brightness(.92) contrast(.88) saturate(.7);
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --ground: #0F1619; --surface: #16222A; --surface-2: #1E2C34;
+    --ink: #E4EAEC; --muted: #97A6AE; --line: #2A3A42;
+    --accent: #3FB7A5; --accent-ink: #0B1B18; --focus: #6FA1E8;
+    --d-urban: #3FB7A5; --d-rural: #E39A55; --d-ramanagara: #A88BE0; --d-chikka: #6FA1E8; --d-other: #8FA0A8;
+    --radius-fill: rgba(63, 183, 165, 0.14);
+    --shadow: 0 1px 2px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.4);
+    --tile-filter: invert(1) hue-rotate(180deg) brightness(.92) contrast(.88) saturate(.7);
+    color-scheme: dark;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--ground); color: var(--ink);
+    font: 14px/1.45 "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+    display: flex; flex-direction: column; overflow: hidden;
+  }
+  .mono { font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace; font-variant-numeric: tabular-nums; }
+  button, input, select { font: inherit; color: inherit; }
+  :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+
+  /* ---- header ---- */
+  .top {
+    display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+    padding: 10px 16px; padding-top: calc(10px + env(safe-area-inset-top, 0px));
+    background: var(--surface); border-bottom: 1px solid var(--line);
+  }
+  .brand { display: flex; align-items: baseline; gap: 10px; margin-right: auto; }
+  .brand h1 { font-size: 16px; font-weight: 600; margin: 0; letter-spacing: -0.01em; text-wrap: balance; }
+  .brand .sub { color: var(--muted); font-size: 12px; }
+  .stats { display: flex; gap: 14px; flex-wrap: wrap; color: var(--muted); font-size: 12px; }
+  .stats b { color: var(--ink); font-weight: 600; }
+  .btn {
+    border: 1px solid var(--line); background: var(--surface); border-radius: 6px;
+    padding: 6px 10px; cursor: pointer; font-size: 13px; line-height: 1;
+  }
+  .btn:hover { background: var(--surface-2); }
+  .btn.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+  .btn.active { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+
+  /* ---- body ---- */
+  .wrap { flex: 1; display: flex; min-height: 0; }
+  .side {
+    width: 360px; flex: none; display: flex; flex-direction: column; min-height: 0;
+    background: var(--surface); border-right: 1px solid var(--line);
+  }
+  .side section { padding: 12px 16px; border-bottom: 1px solid var(--line); }
+  .side label.lbl { display: block; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin-bottom: 6px; }
+  .search { width: 100%; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--ground); }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chip {
+    display: inline-flex; align-items: center; gap: 6px; padding: 4px 9px; border-radius: 999px;
+    border: 1px solid var(--line); background: var(--surface); cursor: pointer; font-size: 12px;
+  }
+  .chip .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--dc); }
+  .chip.off { opacity: .45; }
+  .radius-row { display: flex; align-items: center; gap: 10px; }
+  .radius-row input[type=range] { flex: 1; accent-color: var(--accent); }
+  .hint { color: var(--muted); font-size: 12px; margin: 6px 0 0; }
+  .results { flex: 1; overflow: auto; min-height: 0; }
+  .results header { padding: 8px 16px; font-size: 12px; color: var(--muted); position: sticky; top: 0; background: var(--surface); border-bottom: 1px solid var(--line); }
+  .row { display: grid; grid-template-columns: 10px 1fr auto; gap: 10px; align-items: start; padding: 10px 16px; border-bottom: 1px solid var(--line); cursor: pointer; }
+  .row:hover { background: var(--surface-2); }
+  .row .dot { width: 10px; height: 10px; border-radius: 50%; margin-top: 5px; background: var(--dc); }
+  .row .name { font-weight: 500; }
+  .row .meta { color: var(--muted); font-size: 12px; }
+  .row .dist { color: var(--muted); font-size: 12px; white-space: nowrap; }
+  .empty { padding: 24px 16px; color: var(--muted); }
+
+  #map { flex: 1; min-width: 0; background: var(--ground); }
+  .leaflet-tile { filter: var(--tile-filter); }
+  .leaflet-container { font: inherit; }
+  .leaflet-popup-content-wrapper, .leaflet-popup-tip { background: var(--surface); color: var(--ink); box-shadow: var(--shadow); }
+  .leaflet-popup-content { margin: 12px 14px; font-size: 13px; line-height: 1.4; }
+  .pop h3 { margin: 0 0 4px; font-size: 14px; font-weight: 600; }
+  .pop .meta { color: var(--muted); font-size: 12px; margin-bottom: 8px; }
+  .pop .rera { font-size: 12px; display: block; margin-bottom: 8px; }
+  .pop a { color: var(--accent); font-weight: 500; }
+  .leaflet-control-attribution { background: var(--surface); color: var(--muted); }
+  .leaflet-control-attribution a { color: var(--accent); }
+  .leaflet-bar a { background: var(--surface); color: var(--ink); border-bottom-color: var(--line); }
+  .leaflet-bar a:hover { background: var(--surface-2); }
+  .marker-cluster div { background: var(--accent); color: var(--accent-ink); font: 500 12px/30px "IBM Plex Mono", monospace; }
+  .marker-cluster { background: var(--radius-fill); }
+  .picking .leaflet-container { cursor: crosshair; }
+
+  .notice { padding: 12px 16px; background: var(--surface-2); color: var(--muted); font-size: 12px; border-bottom: 1px solid var(--line); }
+  .notice b { color: var(--ink); }
+  .toggle-side { display: none; }
+
+  @media (max-width: 760px) {
+    .wrap { flex-direction: column; }
+    .side { width: 100%; max-height: 46vh; border-right: 0; border-top: 1px solid var(--line); order: 2; }
+    .side.collapsed { max-height: 0; overflow: hidden; border: 0; }
+    #map { order: 1; min-height: 40vh; }
+    .toggle-side { display: inline-block; }
+    .stats { width: 100%; }
+  }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+</head>
+<body>
+
+<div class="top">
+  <div class="brand">
+    <h1>Bengaluru RERA Map</h1>
+    <span class="sub">confirmed locations only</span>
+  </div>
+  <div class="stats" id="stats">Loading pins…</div>
+  <button class="btn toggle-side" id="toggleSide" type="button">Filters &amp; list</button>
+  <button class="btn" id="reload" type="button" title="Fetch the latest pins">Refresh</button>
+</div>
+
+<div class="wrap">
+  <aside class="side" id="side">
+    <section>
+      <label class="lbl" for="q">Search</label>
+      <input class="search" id="q" type="search" placeholder="Project, promoter or RERA number" autocomplete="off">
+    </section>
+    <section>
+      <span class="lbl">District</span>
+      <div class="chips" id="chips"></div>
+    </section>
+    <section>
+      <span class="lbl">Within a radius</span>
+      <div class="radius-row">
+        <button class="btn" id="pick" type="button">Pick a centre on the map</button>
+        <button class="btn" id="clearRadius" type="button" hidden>Clear</button>
+      </div>
+      <div class="radius-row" style="margin-top:8px">
+        <input type="range" id="radius" min="1" max="15" step="0.5" value="5" aria-label="Radius in kilometres">
+        <span class="mono" id="radiusLabel">5.0 km</span>
+      </div>
+      <p class="hint" id="radiusHint">Click the button, then click anywhere on the map. Results sort nearest first.</p>
+    </section>
+    <div class="results" id="results">
+      <header id="resultsHeader">—</header>
+      <div id="list"></div>
+    </div>
+  </aside>
+  <div id="map" role="application" aria-label="Map of Bengaluru RERA projects"></div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet.markercluster/1.5.3/leaflet.markercluster.js"></script>
+<script>
+(function () {
+  'use strict';
+
+  var DISTRICT_VAR = {
+    'Bengaluru Urban': '--d-urban',
+    'Bengaluru Rural': '--d-rural',
+    'Ramanagara (BMRDA)': '--d-ramanagara',
+    'Chikkaballapura (North Bengaluru Corridor)': '--d-chikka'
+  };
+  function districtVar(d) { return DISTRICT_VAR[d] || '--d-other'; }
+  function districtColor(d) {
+    return getComputedStyle(document.documentElement).getPropertyValue(districtVar(d)).trim() || '#6B7A82';
+  }
+  function shortDistrict(d) { return (d || 'Other').split('(')[0].trim(); }
+  function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+    return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); }
+  function haversineKm(a, b) {
+    var R = 6371, toR = Math.PI / 180;
+    var dLat = (b[0] - a[0]) * toR, dLng = (b[1] - a[1]) * toR;
+    var s = Math.sin(dLat/2)*Math.sin(dLat/2) + Math.cos(a[0]*toR)*Math.cos(b[0]*toR)*Math.sin(dLng/2)*Math.sin(dLng/2);
+    return 2 * R * Math.asin(Math.sqrt(s));
+  }
+
+  // ---- map ----
+  var map = L.map('map', { zoomControl: true, preferCanvas: true }).setView([12.97, 77.59], 11);
+  L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    maxZoom: 19,
+    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+  }).addTo(map);
+  var cluster = L.markerClusterGroup({ maxClusterRadius: 48, disableClusteringAtZoom: 15, spiderfyOnMaxZoom: true });
+  map.addLayer(cluster);
+
+  // ---- state ----
+  var all = [];            // {lat,lng,name,promoter,district,rera,link,status,marker}
+  var meta = {};
+  var activeDistricts = new Set();
+  var query = '';
+  var centre = null;       // [lat,lng]
+  var radiusKm = 5;
+  var centreMarker = null, circle = null, picking = false;
+
+  var els = {
+    stats: document.getElementById('stats'), chips: document.getElementById('chips'),
+    q: document.getElementById('q'), list: document.getElementById('list'),
+    header: document.getElementById('resultsHeader'), pick: document.getElementById('pick'),
+    clear: document.getElementById('clearRadius'), radius: document.getElementById('radius'),
+    radiusLabel: document.getElementById('radiusLabel'), hint: document.getElementById('radiusHint'),
+    side: document.getElementById('side'), toggle: document.getElementById('toggleSide'),
+    reload: document.getElementById('reload')
+  };
+
+  // ---- data ----
+  function load() {
+    els.stats.textContent = 'Loading pins…';
+    fetch('pins.geojson', { cache: 'no-store' })
+      .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+      .then(function (gj) {
+        meta = gj.meta || {};
+        cluster.clearLayers();
+        all = (gj.features || []).map(function (f) {
+          var p = f.properties || {};
+          var c = f.geometry.coordinates;
+          var item = { lat: c[1], lng: c[0], name: p.name || '', promoter: p.promoter || '',
+                       district: p.district || '', rera: p.rera || '', link: p.link || '', status: p.status || '' };
+          item.marker = L.circleMarker([item.lat, item.lng], {
+            radius: 6, weight: 1.5, color: '#ffffff', fillColor: districtColor(item.district), fillOpacity: 0.95
+          }).bindPopup(popupHtml(item));
+          return item;
+        });
+        buildChips();
+        render();
+      })
+      .catch(function (e) {
+        els.stats.innerHTML = '<b>Could not load pins</b> (' + esc(e.message) + '). The map refreshes after each tracker run; try again shortly.';
+        els.list.innerHTML = '<div class="empty">No data loaded.</div>';
+      });
+  }
+
+  function popupHtml(it) {
+    var mapsLink = it.link || ('https://www.google.com/maps/search/?api=1&query=' + it.lat + ',' + it.lng);
+    return '<div class="pop">' +
+      '<h3>' + esc(it.name) + '</h3>' +
+      '<div class="meta">' + esc(it.promoter) + (it.promoter ? ' · ' : '') + esc(shortDistrict(it.district)) + '</div>' +
+      '<span class="rera mono">' + esc(it.rera) + '</span>' +
+      '<a href="' + esc(mapsLink) + '" target="_blank" rel="noopener">Open in Google Maps</a>' +
+      '<div class="meta" style="margin-top:8px">Location confirmed by geocoding' + (it.status ? ' · ' + esc(it.status) : '') + '</div>' +
+      '</div>';
+  }
+
+  function buildChips() {
+    var counts = {};
+    all.forEach(function (it) { counts[it.district] = (counts[it.district] || 0) + 1; });
+    var names = Object.keys(counts).sort(function (a, b) { return counts[b] - counts[a]; });
+    activeDistricts = new Set(names);
+    els.chips.innerHTML = names.map(function (d) {
+      return '<button type="button" class="chip" data-d="' + esc(d) + '" style="--dc:var(' + districtVar(d) + ')">' +
+        '<span class="dot"></span>' + esc(shortDistrict(d)) + ' <span class="mono">' + counts[d] + '</span></button>';
+    }).join('');
+    Array.prototype.forEach.call(els.chips.querySelectorAll('.chip'), function (b) {
+      b.addEventListener('click', function () {
+        var d = b.getAttribute('data-d');
+        if (activeDistricts.has(d)) activeDistricts.delete(d); else activeDistricts.add(d);
+        b.classList.toggle('off', !activeDistricts.has(d));
+        render();
+      });
+    });
+  }
+
+  // ---- filtering + rendering ----
+  function matches(it) {
+    if (!activeDistricts.has(it.district)) return false;
+    if (query) {
+      var hay = (it.name + ' ' + it.promoter + ' ' + it.rera).toLowerCase();
+      if (hay.indexOf(query) === -1) return false;
+    }
+    return true;
+  }
+
+  function render() {
+    var visible = all.filter(matches);
+    if (centre) {
+      visible = visible.map(function (it) { it.dist = haversineKm(centre, [it.lat, it.lng]); return it; })
+                       .filter(function (it) { return it.dist <= radiusKm; })
+                       .sort(function (a, b) { return a.dist - b.dist; });
+    } else {
+      visible.forEach(function (it) { it.dist = null; });
+      visible.sort(function (a, b) { return a.name.localeCompare(b.name); });
+    }
+
+    cluster.clearLayers();
+    cluster.addLayers(visible.map(function (it) { return it.marker; }));
+
+    var located = all.length, total = meta.in_region_total || null;
+    var asOf = meta.generated_at ? new Date(meta.generated_at) : null;
+    els.stats.innerHTML =
+      '<span><b class="mono">' + located.toLocaleString() + '</b> located' +
+      (total ? ' of <span class="mono">' + total.toLocaleString() + '</span> Bengaluru-region registrations' : '') + '</span>' +
+      (asOf ? '<span>data as of <b>' + esc(asOf.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })) + '</b></span>' : '');
+
+    var scope = centre ? ('within ' + radiusKm.toFixed(1) + ' km of the chosen point') : 'matching filters';
+    els.header.innerHTML = '<span class="mono">' + visible.length.toLocaleString() + '</span> projects ' + esc(scope) +
+      (visible.length > 300 ? ' · showing first 300' : '');
+
+    var rows = visible.slice(0, 300);
+    if (!rows.length) {
+      els.list.innerHTML = '<div class="empty">Nothing matches. Widen the radius or clear a filter.</div>';
+      return;
+    }
+    els.list.innerHTML = rows.map(function (it, i) {
+      return '<div class="row" data-i="' + i + '" style="--dc:var(' + districtVar(it.district) + ')" role="button" tabindex="0">' +
+        '<span class="dot"></span>' +
+        '<div><div class="name">' + esc(it.name) + '</div>' +
+        '<div class="meta">' + esc(it.promoter) + (it.promoter ? ' · ' : '') + esc(shortDistrict(it.district)) + '</div></div>' +
+        '<span class="dist mono">' + (it.dist != null ? it.dist.toFixed(2) + ' km' : '') + '</span>' +
+        '</div>';
+    }).join('');
+    Array.prototype.forEach.call(els.list.querySelectorAll('.row'), function (row) {
+      var it = rows[+row.getAttribute('data-i')];
+      function go() {
+        map.setView([it.lat, it.lng], Math.max(map.getZoom(), 15));
+        cluster.zoomToShowLayer(it.marker, function () { it.marker.openPopup(); });
+        if (window.innerWidth <= 760) els.side.classList.add('collapsed');
+      }
+      row.addEventListener('click', go);
+      row.addEventListener('keydown', function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); go(); } });
+    });
+  }
+
+  // ---- radius tool ----
+  function setCentre(latlng) {
+    centre = [latlng.lat, latlng.lng];
+    if (!centreMarker) {
+      centreMarker = L.marker(latlng, { draggable: true, title: 'Radius centre' }).addTo(map);
+      centreMarker.on('dragend', function () { setCentre(centreMarker.getLatLng()); });
+    } else centreMarker.setLatLng(latlng);
+    if (!circle) {
+      circle = L.circle(latlng, { radius: radiusKm * 1000, color: districtColor('Bengaluru Urban'), weight: 1.5, fillColor: districtColor('Bengaluru Urban'), fillOpacity: 0.08 }).addTo(map);
+    } else { circle.setLatLng(latlng); circle.setRadius(radiusKm * 1000); }
+    els.clear.hidden = false;
+    els.hint.textContent = 'Drag the pin to move the centre. Results are sorted nearest first.';
+    map.fitBounds(circle.getBounds(), { padding: [20, 20] });
+    render();
+  }
+  function stopPicking() { picking = false; document.body.classList.remove('picking'); els.pick.classList.remove('active'); els.pick.textContent = centre ? 'Pick a new centre' : 'Pick a centre on the map'; }
+  els.pick.addEventListener('click', function () {
+    picking = !picking;
+    document.body.classList.toggle('picking', picking);
+    els.pick.classList.toggle('active', picking);
+    els.pick.textContent = picking ? 'Now click on the map…' : (centre ? 'Pick a new centre' : 'Pick a centre on the map');
+    if (picking && window.innerWidth <= 760) els.side.classList.add('collapsed');
+  });
+  map.on('click', function (e) { if (picking) { setCentre(e.latlng); stopPicking(); } });
+  els.clear.addEventListener('click', function () {
+    centre = null;
+    if (centreMarker) { map.removeLayer(centreMarker); centreMarker = null; }
+    if (circle) { map.removeLayer(circle); circle = null; }
+    els.clear.hidden = true;
+    els.hint.textContent = 'Click the button, then click anywhere on the map. Results sort nearest first.';
+    stopPicking(); render();
+  });
+  els.radius.addEventListener('input', function () {
+    radiusKm = parseFloat(els.radius.value);
+    els.radiusLabel.textContent = radiusKm.toFixed(1) + ' km';
+    if (circle) { circle.setRadius(radiusKm * 1000); render(); }
+  });
+
+  // ---- search, layout, reload ----
+  var t;
+  els.q.addEventListener('input', function () { clearTimeout(t); t = setTimeout(function () { query = els.q.value.trim().toLowerCase(); render(); }, 120); });
+  els.toggle.addEventListener('click', function () { els.side.classList.toggle('collapsed'); });
+  els.reload.addEventListener('click', load);
+  window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', function () {
+    all.forEach(function (it) { it.marker.setStyle({ fillColor: districtColor(it.district) }); });
+    if (circle) circle.setStyle({ color: districtColor('Bengaluru Urban'), fillColor: districtColor('Bengaluru Urban') });
+  });
+
+  load();
+})();
+</script>
+</body>
+</html>
