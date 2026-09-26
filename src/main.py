@@ -152,6 +152,8 @@ def run_geocoding_stage(gsheet: GoogleSheetManager) -> int:
         f"via '{geocoder.backend}' "
         f"| resolved: {geocoder.hits} | unresolved: {geocoder.misses} "
         f"| Bangalore-region rows still without coordinates: {max(0, in_region - geocoder.hits)}"
+        + (f" | Places fallback: {geocoder.places_calls} calls, {geocoder.places_hits} rescued"
+           if geocoder.places_calls else "")
     )
 
     return written_total
@@ -277,6 +279,16 @@ def run_pipeline() -> dict:
         logger.info("[STAGE 4] Geocoding disabled via GEOCODE_ENABLED=false. Skipping.")
 
     # --------------------------------------------------------------------------
+    # STAGE 4b: Publish the agent-facing Map_Pins tab
+    # --------------------------------------------------------------------------
+    map_pins = 0
+    if gsheet.client and gsheet.krera_raw_sheet:
+        try:
+            map_pins = gsheet.export_map_pins()
+        except Exception as e:
+            logger.error(f"Map_Pins export failed: {e}", exc_info=True)
+
+    # --------------------------------------------------------------------------
     # STAGE 5: Share the Spreadsheet with the Configured Recipients
     # --------------------------------------------------------------------------
     shared_with = []
@@ -295,6 +307,7 @@ def run_pipeline() -> dict:
     logger.info(f"   • Brand New Added to Bangalore_Projects: {new_added}")
     logger.info(f"   • Existing Rows Matched: {existing_updated}")
     logger.info(f"   • Rows Geocoded This Run: {geocoded_count}")
+    logger.info(f"   • Projects on the Map_Pins tab: {map_pins}")
     logger.info(f"   • Shared With: {', '.join(shared_with) if shared_with else 'nobody new'}")
     logger.info("==================================================================")
 
@@ -306,6 +319,7 @@ def run_pipeline() -> dict:
         "new_added": new_added,
         "existing_updated": existing_updated,
         "geocoded": geocoded_count,
+        "map_pins": map_pins,
         "shared_with": shared_with,
         "elapsed_seconds": elapsed,
         "sheet_url": gsheet.sheet_url if gsheet.client else None

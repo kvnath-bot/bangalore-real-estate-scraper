@@ -46,6 +46,13 @@ GEOAPIFY_API_KEY = os.getenv("GEOAPIFY_API_KEY", "").strip()
 # the Cloud project, so it is deliberately ranked below the free-tier providers.
 GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY", "").strip()
 
+# When the Google Geocoding API finds nothing, retry through the Places Text
+# Search API. Geocoding resolves ADDRESSES; Places resolves POIs, which is what
+# a project name actually is - this is what lifts villa and small-project
+# coverage off the floor. Places costs more per call than Geocoding, so it runs
+# only on the misses. Needs the Places API enabled on the same Cloud project.
+GOOGLE_PLACES_FALLBACK = os.getenv("GOOGLE_PLACES_FALLBACK", "true").strip().lower() in ("1", "true", "yes")
+
 # Free OpenStreetMap geocoder. Its usage policy requires an identifying User-Agent.
 NOMINATIM_ENDPOINT = os.getenv("NOMINATIM_ENDPOINT", "https://nominatim.openstreetmap.org/search").strip()
 GEOCODE_USER_AGENT = os.getenv(
