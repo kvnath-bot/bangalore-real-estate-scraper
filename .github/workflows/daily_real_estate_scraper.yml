@@ -17,7 +17,7 @@ jobs:
   scrape-and-sync:
     name: Scrape Bangalore Projects & Sync to GSheet
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
 
     steps:
       - name: Checkout Code
@@ -41,6 +41,15 @@ jobs:
           GCP_SERVICE_ACCOUNT_KEY: ${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}
           GOOGLE_SHEET_NAME: ${{ secrets.GOOGLE_SHEET_NAME || 'Bangalore Real Estate Projects Tracker' }}
           SEARCH_STRATEGY: ${{ github.event.inputs.search_strategy || secrets.SEARCH_STRATEGY || 'hybrid' }}
+          SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
+          # Geocoding: leave GOOGLE_MAPS_API_KEY unset to use the free Nominatim backend.
+          GEOCODE_ENABLED: ${{ vars.GEOCODE_ENABLED || 'true' }}
+          GEOCODE_MAX_PER_RUN: ${{ vars.GEOCODE_MAX_PER_RUN || '400' }}
+          GOOGLE_MAPS_API_KEY: ${{ secrets.GOOGLE_MAPS_API_KEY }}
+          # Sheet sharing: comma-separated Gmail / Workspace addresses.
+          SHARE_WITH_EMAILS: ${{ secrets.SHARE_WITH_EMAILS }}
+          SHARE_ROLE: ${{ vars.SHARE_ROLE || 'writer' }}
+          SHARE_NOTIFY: ${{ vars.SHARE_NOTIFY || 'false' }}
         run: |
           python src/main.py
 

@@ -7,6 +7,9 @@ service_account*.json
 !scraped_projects_latest.json
 !src/data/*.json
 
+# Local geocode cache (the Google Sheet is the source of truth for coordinates)
+src/data/geocode_cache.json
+
 # Python
 __pycache__/
 *.py[cod]
