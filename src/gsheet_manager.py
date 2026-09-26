@@ -311,7 +311,17 @@ class GoogleSheetManager:
                 "project_name": row[1].strip() if len(row) > 1 else "",
                 "district": row[4].strip() if len(row) > 4 else "",
             })
-        logger.info(f"[GSheet Manager] {len(pending)} KRERA_Raw_Projects rows still need coordinates.")
+        # A district histogram, because "8943 rows need coordinates" hid the fact
+        # that only a fraction were recognised as Bangalore-region and written.
+        histogram: Dict[str, int] = {}
+        for entry in pending:
+            histogram[entry["district"] or "(blank)"] = histogram.get(entry["district"] or "(blank)", 0) + 1
+        top = sorted(histogram.items(), key=lambda kv: -kv[1])[:12]
+        logger.info(
+            f"[GSheet Manager] {len(pending)} KRERA_Raw_Projects rows still need "
+            f"coordinates. District values seen: "
+            + ", ".join(f"{name}={count}" for name, count in top)
+        )
         return pending
 
     def update_krera_map_columns(self, row_values: Dict[int, List[str]]) -> int:

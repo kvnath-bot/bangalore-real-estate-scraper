@@ -66,14 +66,30 @@ def run_geocoding_stage(gsheet: GoogleSheetManager) -> int:
     geocoder = Geocoder()
     row_values = {}
     attempted = 0
+    in_region = 0
+    out_of_region = 0
+    build_errors = 0
 
     for entry in pending:
-        raw = KRERARawProject(
-            rera_number=entry["rera_number"],
-            project_name=entry["project_name"] or entry["rera_number"],
-            promoter_name="",
-            district=entry["district"] or KRERARawProject.get_district_from_rera(entry["rera_number"]),
-        )
+        try:
+            raw = KRERARawProject(
+                rera_number=entry["rera_number"],
+                project_name=entry["project_name"] or entry["rera_number"],
+                promoter_name="",
+                district=entry["district"] or KRERARawProject.get_district_from_rera(entry["rera_number"]),
+            )
+        except Exception as e:
+            # Previously an unparseable row would abort the whole stage silently
+            # partway through, which is a candidate explanation for a short write.
+            build_errors += 1
+            if build_errors <= 5:
+                logger.warning(f"[Geocoder] Skipping row {entry['row']} ({entry['rera_number']}): {e}")
+            continue
+
+        if raw.is_bangalore_region():
+            in_region += 1
+        else:
+            out_of_region += 1
 
         latitude = ""
         longitude = ""
@@ -105,10 +121,20 @@ def run_geocoding_stage(gsheet: GoogleSheetManager) -> int:
 
     geocoder.save_cache()
     logger.info(
+        f"[Geocoder] Rows examined: {len(pending)} | Bangalore-region: {in_region} "
+        f"| out of scope (skipped): {out_of_region} | unparseable: {build_errors} "
+        f"| rows queued for writing: {len(row_values)}"
+    )
+    if in_region != len(row_values):
+        logger.warning(
+            f"[Geocoder] Expected to write one row per Bangalore-region row "
+            f"({in_region}) but queued {len(row_values)}. These should match."
+        )
+    logger.info(
         f"[Geocoder] Lookups this run: {geocoder.lookups_used}/{geocoder.max_lookups} "
         f"via '{geocoder.backend}' "
         f"| resolved: {geocoder.hits} | unresolved: {geocoder.misses} "
-        f"| rows still awaiting coordinates: {max(0, len(pending) - geocoder.hits)}"
+        f"| Bangalore-region rows still without coordinates: {max(0, in_region - geocoder.hits)}"
     )
 
     return gsheet.update_krera_map_columns(row_values)

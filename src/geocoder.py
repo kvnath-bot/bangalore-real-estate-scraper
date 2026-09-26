@@ -65,13 +65,19 @@ GEOAPIFY_ENDPOINT = "https://api.geoapify.com/v1/geocode/search"
 BACKEND_SETTINGS: Dict[str, Dict[str, float]] = {
     # Public OSM endpoint: hard policy limit of 1 req/sec, bulk use disallowed.
     BACKEND_NOMINATIM: {"delay": 1.1, "budget": 400},
-    # Free tier is on the order of 5k/day at ~2 req/sec.
-    BACKEND_LOCATIONIQ: {"delay": 0.55, "budget": 4500},
+    # Free tier is ~5k/day but only 1 req/sec - pacing at 0.55s (~1.8/s) earned
+    # an HTTP 429 after just 79 lookups on a live run.
+    BACKEND_LOCATIONIQ: {"delay": 1.05, "budget": 4500},
     # Free tier is on the order of 3k/day.
     BACKEND_GEOAPIFY: {"delay": 0.25, "budget": 2800},
     # Billable; the ceiling here is just a sanity cap, not a free allowance.
     BACKEND_GOOGLE: {"delay": 0.05, "budget": 10000},
 }
+
+# How many times to back off and retry a "slow down" 429 before giving up on the
+# run. A daily-quota 429 is never retried.
+RATE_LIMIT_RETRIES = 3
+RATE_LIMIT_BACKOFF_SECONDS = [5, 15, 40]
 
 # Bounding box around the Bengaluru metropolitan region (BMRDA extent).
 # Anything resolved outside this box is treated as a bad match and discarded.
@@ -233,30 +239,65 @@ class Geocoder:
 
     # --------------------------------------------------------------- backends
     def _get(self, url: str, params: dict, headers: Optional[dict] = None):
-        """Shared request + pacing. Returns the parsed body, or None on failure."""
-        try:
-            resp = requests.get(url, params=params, headers=headers or {}, timeout=20)
-            time.sleep(self.delay)
-            if resp.status_code in (401, 403):
-                self._abort(
-                    f"{self.backend} rejected the API key (HTTP {resp.status_code}) - "
-                    f"check the key is correct and the service is enabled."
-                )
+        """
+        Shared request, pacing and error policy. Returns the parsed body, or None
+        when there is no usable result.
+
+        A 429 is retried with backoff unless it names a DAILY limit: providers use
+        the same status for "too fast, slow down" and "you are out of quota until
+        tomorrow", and only the second is worth ending the run over. Treating both
+        as fatal cost a live run 4,421 of its 4,500 lookups.
+        """
+        for attempt in range(RATE_LIMIT_RETRIES + 1):
+            try:
+                resp = requests.get(url, params=params, headers=headers or {}, timeout=20)
+                time.sleep(self.delay)
+
+                if resp.status_code in (401, 403):
+                    self._abort(
+                        f"{self.backend} rejected the API key (HTTP {resp.status_code}) - "
+                        f"check the key is correct and the service is enabled."
+                    )
+                    return None
+
+                if resp.status_code == 429:
+                    body = (resp.text or "")[:200]
+                    if "day" in body.lower() or "daily" in body.lower():
+                        self._abort(
+                            f"{self.backend} daily quota is exhausted ({body.strip()}). "
+                            f"Remaining rows will be picked up on the next run."
+                        )
+                        return None
+                    if attempt < RATE_LIMIT_RETRIES:
+                        backoff = RATE_LIMIT_BACKOFF_SECONDS[attempt]
+                        logger.info(
+                            f"[Geocoder] {self.backend} asked us to slow down "
+                            f"(HTTP 429); waiting {backoff}s and retrying."
+                        )
+                        time.sleep(backoff)
+                        continue
+                    self._abort(
+                        f"{self.backend} still rate-limiting after "
+                        f"{RATE_LIMIT_RETRIES} backoffs. Remaining rows will be "
+                        f"retried on the next run."
+                    )
+                    return None
+
+                # LocationIQ and Nominatim answer 404 for "nothing matched", which
+                # is an ordinary miss rather than a failure worth warning about.
+                if resp.status_code == 404:
+                    return None
+
+                if resp.status_code != 200:
+                    logger.warning(f"[Geocoder] {self.backend} returned HTTP {resp.status_code}.")
+                    return None
+
+                return resp.json()
+            except Exception as e:
+                logger.warning(f"[Geocoder] {self.backend} request failed: {e}")
+                time.sleep(self.delay)
                 return None
-            if resp.status_code == 429:
-                self._abort(
-                    f"{self.backend} rate-limited this run (HTTP 429). "
-                    f"Remaining rows will be retried on the next run."
-                )
-                return None
-            if resp.status_code != 200:
-                logger.warning(f"[Geocoder] {self.backend} returned HTTP {resp.status_code}.")
-                return None
-            return resp.json()
-        except Exception as e:
-            logger.warning(f"[Geocoder] {self.backend} request failed: {e}")
-            time.sleep(self.delay)
-            return None
+        return None
 
     def _lookup_nominatim(self, address: str) -> Optional[Tuple[float, float]]:
         payload = self._get(
