@@ -113,7 +113,7 @@ def run_geocoding_stage(gsheet: GoogleSheetManager) -> int:
         longitude = ""
         if raw.is_bangalore_region():
             before = geocoder.lookups_used
-            coords = geocoder.geocode_address(raw.geocode_query())
+            coords = geocoder.geocode_any(raw.geocode_queries())
             attempted += geocoder.lookups_used - before
             if coords:
                 latitude = f"{coords[0]:.6f}"
@@ -154,6 +154,8 @@ def run_geocoding_stage(gsheet: GoogleSheetManager) -> int:
         f"| Bangalore-region rows still without coordinates: {max(0, in_region - geocoder.hits)}"
         + (f" | Places fallback: {geocoder.places_calls} calls, {geocoder.places_hits} rescued"
            if geocoder.places_calls else "")
+        + (f" | name variants rescued {geocoder.variant_hits} that the registered name missed"
+           if geocoder.variant_hits else "")
     )
 
     return written_total

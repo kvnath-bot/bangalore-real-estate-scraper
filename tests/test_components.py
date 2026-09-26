@@ -973,5 +973,118 @@ class TestMapPinsExport(unittest.TestCase):
         self.assertEqual(mgr.export_map_pins(), 0)
 
 
+class TestProjectNameCleaning(unittest.TestCase):
+    """
+    17.4% of Bangalore-region registrations carry phase/wing/block noise.
+    "GODREJ FLORENNE PHASE II" is not a place; "GODREJ FLORENNE" is.
+    """
+
+    def test_strips_trailing_unit_markers(self):
+        cases = {
+            "GODREJ FLORENNE PHASE II": "GODREJ FLORENNE",
+            "AIKAM GOLF ESTATES PHASE II": "AIKAM GOLF ESTATES",
+            "SOBHA Crystal Meadows Phase 2 Wing 7 and 8": "SOBHA Crystal Meadows",
+            "Sobha Dream Acres - Rain Forest Phase 3 Wing 5": "Sobha Dream Acres - Rain Forest",
+            "Nikoo Homes 9, Alpine, Bhartiya Garden Hill Ph-1": "Nikoo Homes 9, Alpine, Bhartiya Garden Hill",
+        }
+        for raw, expected in cases.items():
+            self.assertEqual(KRERARawProject.clean_project_name(raw), expected, raw)
+
+    def test_strips_parentheticals(self):
+        self.assertEqual(
+            KRERARawProject.clean_project_name("Purva Park Hill (Wing D)"), "Purva Park Hill"
+        )
+
+    def test_leaves_clean_names_alone(self):
+        for name in ["Prestige Park Grove", "Brigade Meadows", "Sobha Neopolis"]:
+            self.assertEqual(KRERARawProject.clean_project_name(name), name)
+
+    def test_never_returns_empty(self):
+        """A name that is entirely noise must not be cleaned away to nothing."""
+        for name in ["Phase 2", "Wing A", "Block 3"]:
+            self.assertTrue(KRERARawProject.clean_project_name(name).strip(), name)
+
+    def test_does_not_eat_words_containing_a_marker(self):
+        """'Phoenix' starts with 'ph' but is not a phase marker."""
+        self.assertEqual(KRERARawProject.clean_project_name("Phoenix Towers East"),
+                         KRERARawProject.clean_project_name("Phoenix Towers East"))
+        self.assertIn("Phoenix", KRERARawProject.clean_project_name("Phoenix One Bangalore West"))
+
+
+class TestGeocodeQueryVariants(unittest.TestCase):
+
+    def _raw(self, name, district="Bengaluru Urban"):
+        return KRERARawProject(
+            rera_number="PRM/KA/RERA/1251/1/PR/1/1", project_name=name,
+            promoter_name="P", district=district,
+        )
+
+    def test_noisy_name_yields_a_cleaned_variant(self):
+        qs = self._raw("GODREJ FLORENNE PHASE II").geocode_queries()
+        self.assertEqual(qs[0], "GODREJ FLORENNE PHASE II, Bengaluru Urban, Karnataka, India")
+        self.assertIn("GODREJ FLORENNE, Bengaluru Urban, Karnataka, India", qs)
+        self.assertIn("GODREJ FLORENNE, Bengaluru, Karnataka, India", qs)
+
+    def test_clean_name_still_gets_a_broader_variant(self):
+        """Dropping the specific district is its own retry, even for clean names."""
+        qs = self._raw("Prestige Park Grove").geocode_queries()
+        self.assertEqual(len(qs), 2)
+        self.assertTrue(qs[1].endswith("Bengaluru, Karnataka, India"))
+
+    def test_variants_are_deduplicated(self):
+        qs = self._raw("Some Project", district="Other Karnataka").geocode_queries()
+        self.assertEqual(len(qs), len(set(qs)))
+
+    def test_first_variant_matches_the_single_query_form(self):
+        raw = self._raw("GODREJ FLORENNE PHASE II")
+        self.assertEqual(raw.geocode_queries()[0], raw.geocode_query())
+
+
+class TestGeocodeAny(unittest.TestCase):
+    """geocode_any tries phrasings in order and measures which one paid off."""
+
+    def _geocoder(self, tmp):
+        from src import geocoder
+        g = geocoder.Geocoder(cache_file=Path(tmp) / "c.json", backend="locationiq")
+        g.delay = 0
+        return g
+
+    def test_stops_at_the_first_hit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            g = self._geocoder(tmp)
+            g.cache["a, bengaluru"] = [12.94, 77.74]
+            calls = []
+            g._lookup_locationiq = lambda addr: calls.append(addr)
+            self.assertEqual(g.geocode_any(["A, Bengaluru", "B, Bengaluru"]), (12.94, 77.74))
+            self.assertEqual(calls, [], "must not try later variants after a hit")
+            self.assertEqual((g.first_try_hits, g.variant_hits), (1, 0))
+
+    def test_falls_through_to_a_later_variant(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            g = self._geocoder(tmp)
+            g.cache["noisy name phase ii, bengaluru"] = None      # cached miss
+            g.cache["noisy name, bengaluru"] = [12.86, 77.53]     # cleaned hit
+            coords = g.geocode_any(["Noisy Name Phase II, Bengaluru", "Noisy Name, Bengaluru"])
+            self.assertEqual(coords, (12.86, 77.53))
+            self.assertEqual((g.first_try_hits, g.variant_hits), (0, 1))
+
+    def test_all_variants_missing_is_a_miss(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            g = self._geocoder(tmp)
+            g.cache["a, bengaluru"] = None
+            g.cache["b, bengaluru"] = None
+            self.assertIsNone(g.geocode_any(["A, Bengaluru", "B, Bengaluru"]))
+            self.assertEqual((g.first_try_hits, g.variant_hits), (0, 0))
+
+    def test_exhausted_budget_stops_the_variant_loop(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            g = self._geocoder(tmp)
+            g.lookups_used = g.max_lookups
+            calls = []
+            g._lookup_locationiq = lambda addr: calls.append(addr)
+            self.assertIsNone(g.geocode_any(["A, Bengaluru", "B, Bengaluru", "C, Bengaluru"]))
+            self.assertEqual(calls, [])
+
+
 if __name__ == "__main__":
     unittest.main()
