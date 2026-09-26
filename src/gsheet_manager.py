@@ -238,22 +238,28 @@ class GoogleSheetManager:
             builder_name = row[1] if len(row) > 1 else ""
             rera_no = row[8] if len(row) > 8 else ""
 
-            clean_rera = "".join(filter(str.isalnum, rera_no.lower()))
-            if clean_rera and "pending" not in clean_rera and "not" not in clean_rera and "verified" not in clean_rera and len(clean_rera) > 6:
-                existing_keys[f"rera:{clean_rera}"] = idx
-            else:
-                clean_p = "".join(filter(str.isalnum, proj_name.lower()))
-                clean_b = "".join(filter(str.isalnum, builder_name.lower()))
-                existing_keys[f"name:{clean_p}|{clean_b}"] = idx
+            # Index each existing row under every key it can be recognised by,
+            # so a project already in the sheet is never appended a second time
+            # just because this run discovered it without a RERA number.
+            row_project = RealEstateProject(
+                project_name=proj_name,
+                builder_name=builder_name,
+                locality="",
+                rera_number=rera_no or "Pending",
+            )
+            for key in row_project.identity_keys():
+                existing_keys[key] = idx
 
         new_rows_to_append: List[List[str]] = []
         updated_count = 0
 
         for project in scraped_projects:
-            key = project.deduplication_key()
-            if key not in existing_keys:
+            matched = next((k for k in project.identity_keys() if k in existing_keys), None)
+            if matched is None:
                 new_rows_to_append.append(project.to_sheet_row())
-                existing_keys[key] = len(data_rows) + len(new_rows_to_append) + 1
+                row_index = len(data_rows) + len(new_rows_to_append) + 1
+                for key in project.identity_keys():
+                    existing_keys[key] = row_index
             else:
                 updated_count += 1
 

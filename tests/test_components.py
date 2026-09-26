@@ -49,7 +49,10 @@ class TestRealEstateScraperComponents(unittest.TestCase):
         key = project.deduplication_key()
         self.assertTrue(key.startswith("name:"))
         self.assertIn("sobhaneopolis", key)
-        self.assertIn("sobhawithoutspace", key.replace(" ", "") or key)
+        self.assertIn("sobhalimited", key)
+        # The key is normalised: lowercased, with spaces and punctuation stripped.
+        self.assertEqual(key, "name:sobhaneopolis|sobhalimited")
+        self.assertNotIn(" ", key)
 
     def test_gemini_json_parser(self):
         sample_json_text = """
@@ -74,10 +77,14 @@ class TestRealEstateScraperComponents(unittest.TestCase):
         ```
         """
         scraper = GeminiRealEstateScraper(api_key="")
-        projects = scraper._parse_json_response(sample_json_text, "East Bangalore")
+        projects = scraper._parse_json_response(
+            sample_json_text, "East Bangalore", "Gemini (gemini-3.8-flash)"
+        )
         self.assertEqual(len(projects), 1)
         self.assertEqual(projects[0].project_name, "Brigade Sanctuary")
         self.assertEqual(projects[0].locality, "Sarjapur Road")
+        self.assertEqual(projects[0].zone, "East Bangalore")
+        self.assertEqual(projects[0].source_engine, "Gemini (gemini-3.8-flash)")
 
     def test_aggregator_merging(self):
         p1 = RealEstateProject(
@@ -99,6 +106,92 @@ class TestRealEstateScraperComponents(unittest.TestCase):
         self.assertEqual(len(merged), 1)
         self.assertEqual(merged[0].price_range, "₹2.5 Cr onwards")
         self.assertEqual(merged[0].rera_number, "PRM/KA/RERA/1251/310/PR/230123/005655")
+
+    def test_aggregator_merging_is_order_independent(self):
+        """The RERA-bearing record may arrive either first or second."""
+        def pair():
+            with_rera = RealEstateProject(
+                project_name="Godrej Athena",
+                builder_name="Godrej Properties",
+                locality="Indiranagar Extension",
+                price_range="₹2.5 Cr onwards",
+                rera_number="PRM/KA/RERA/1251/310/PR/230123/005655",
+            )
+            without_rera = RealEstateProject(
+                project_name="Godrej Athena",
+                builder_name="Godrej Properties",
+                locality="Indiranagar Extension",
+                price_range="On Request",
+                rera_number="Pending",
+            )
+            return with_rera, without_rera
+
+        aggregator = RealEstateAggregator()
+        with_rera, without_rera = pair()
+        merged = aggregator._deduplicate_and_merge([with_rera, without_rera])
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0].rera_number, "PRM/KA/RERA/1251/310/PR/230123/005655")
+        self.assertEqual(merged[0].price_range, "₹2.5 Cr onwards")
+
+    def test_aggregator_keeps_genuinely_different_projects(self):
+        """Dual-key matching must not collapse distinct projects together."""
+        a = RealEstateProject(
+            project_name="Godrej Athena",
+            builder_name="Godrej Properties",
+            locality="Indiranagar Extension",
+            rera_number="PRM/KA/RERA/1251/310/PR/230123/005655",
+        )
+        b = RealEstateProject(
+            project_name="Godrej Woodscapes",
+            builder_name="Godrej Properties",
+            locality="Budigere Cross",
+            rera_number="PRM/KA/RERA/1251/309/PR/210101/003838",
+        )
+        c = RealEstateProject(
+            project_name="Brigade Sanctuary",
+            builder_name="Brigade Group",
+            locality="Sarjapur Road",
+            rera_number="Pending",
+        )
+        merged = RealEstateAggregator()._deduplicate_and_merge([a, b, c])
+        self.assertEqual(len(merged), 3)
+
+    def test_identity_keys_shape(self):
+        pending = RealEstateProject(
+            project_name="Sobha Neopolis",
+            builder_name="Sobha Limited",
+            locality="Panathur Road",
+            rera_number="Pending",
+        )
+        registered = RealEstateProject(
+            project_name="Sobha Neopolis",
+            builder_name="Sobha Limited",
+            locality="Panathur Road",
+            rera_number="PRM/KA/RERA/1251/446/PR/100823/006141",
+        )
+        # A record without a real RERA number is known only by name...
+        self.assertEqual(pending.identity_keys(), ["name:sobhaneopolis|sobhalimited"])
+        # ...while a registered one is known by both, RERA taking precedence.
+        self.assertEqual(
+            registered.identity_keys(),
+            [
+                "rera:prmkarera1251446pr100823006141",
+                "name:sobhaneopolis|sobhalimited",
+            ],
+        )
+        self.assertEqual(registered.deduplication_key(), registered.rera_key())
+        self.assertEqual(pending.deduplication_key(), pending.name_key())
+
+    def test_is_valid_rera_rejects_placeholders(self):
+        for placeholder in ("", "Pending", "Pending / Not Specified", "Not Specified",
+                            "To be verified", "N/A", "TBA"):
+            self.assertFalse(
+                RealEstateProject.is_valid_rera(placeholder),
+                f"{placeholder!r} should not count as a real RERA number",
+            )
+        self.assertTrue(
+            RealEstateProject.is_valid_rera("PRM/KA/RERA/1251/446/PR/100823/006141")
+        )
 
 
 class TestKRERARawGeoColumns(unittest.TestCase):
@@ -278,6 +371,87 @@ class TestSheetSharing(unittest.TestCase):
         mgr = self._manager()
         self.assertEqual(mgr.share_with_emails([]), [])
         mgr.spreadsheet.share.assert_not_called()
+
+
+class TestSheetSyncDeduplication(unittest.TestCase):
+    """sync_projects must not re-append a project already present in the sheet."""
+
+    def _manager(self, existing_rows):
+        from src.gsheet_manager import GoogleSheetManager
+        mgr = GoogleSheetManager.__new__(GoogleSheetManager)
+        mgr.projects_sheet = mock.MagicMock()
+        mgr.projects_sheet.get_all_values.return_value = (
+            [RealEstateProject.sheet_headers()] + existing_rows
+        )
+        return mgr
+
+    def _row(self, name, builder, rera):
+        return RealEstateProject(
+            project_name=name, builder_name=builder, locality="X", rera_number=rera
+        ).to_sheet_row()
+
+    def test_registered_sheet_row_matches_incoming_record_without_rera(self):
+        """The regression: sheet has the RERA, this run found it without one."""
+        mgr = self._manager([
+            self._row("Godrej Athena", "Godrej Properties", "PRM/KA/RERA/1251/310/PR/230123/005655"),
+        ])
+        incoming = RealEstateProject(
+            project_name="Godrej Athena",
+            builder_name="Godrej Properties",
+            locality="Indiranagar Extension",
+            rera_number="Pending",
+        )
+        new_added, matched = mgr.sync_projects([incoming])
+        self.assertEqual((new_added, matched), (0, 1))
+        mgr.projects_sheet.append_rows.assert_not_called()
+
+    def test_pending_sheet_row_matches_incoming_registered_record(self):
+        """And the mirror case: sheet row is Pending, this run has the RERA."""
+        mgr = self._manager([self._row("Godrej Athena", "Godrej Properties", "Pending")])
+        incoming = RealEstateProject(
+            project_name="Godrej Athena",
+            builder_name="Godrej Properties",
+            locality="Indiranagar Extension",
+            rera_number="PRM/KA/RERA/1251/310/PR/230123/005655",
+        )
+        new_added, matched = mgr.sync_projects([incoming])
+        self.assertEqual((new_added, matched), (0, 1))
+
+    def test_genuinely_new_project_is_appended_once(self):
+        mgr = self._manager([self._row("Godrej Athena", "Godrej Properties", "Pending")])
+        incoming = RealEstateProject(
+            project_name="Brigade Sanctuary",
+            builder_name="Brigade Group",
+            locality="Sarjapur Road",
+            rera_number="PRM/KA/RERA/1251/308/PR/141223/006479",
+        )
+        new_added, matched = mgr.sync_projects([incoming])
+        self.assertEqual((new_added, matched), (1, 0))
+        appended = mgr.projects_sheet.append_rows.call_args[0][0]
+        self.assertEqual(len(appended), 1)
+        self.assertEqual(appended[0][0], "Brigade Sanctuary")
+
+    def test_duplicate_within_one_batch_is_appended_once(self):
+        mgr = self._manager([])
+        a = RealEstateProject(
+            project_name="Brigade Sanctuary", builder_name="Brigade Group",
+            locality="Sarjapur Road", rera_number="PRM/KA/RERA/1251/308/PR/141223/006479",
+        )
+        b = RealEstateProject(
+            project_name="Brigade Sanctuary", builder_name="Brigade Group",
+            locality="Sarjapur Road", rera_number="Pending",
+        )
+        new_added, matched = mgr.sync_projects([a, b])
+        self.assertEqual((new_added, matched), (1, 1))
+
+    def test_blank_sheet_rows_are_ignored(self):
+        mgr = self._manager([[], ["", "", ""]])
+        incoming = RealEstateProject(
+            project_name="Brigade Sanctuary", builder_name="Brigade Group",
+            locality="Sarjapur Road", rera_number="Pending",
+        )
+        new_added, _ = mgr.sync_projects([incoming])
+        self.assertEqual(new_added, 1)
 
 
 if __name__ == "__main__":

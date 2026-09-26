@@ -132,15 +132,45 @@ class RealEstateProject(BaseModel):
     first_discovered: str = Field(default_factory=lambda: datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
     last_updated: str = Field(default_factory=lambda: datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
 
-    def deduplication_key(self) -> str:
-        """Unique key to identify duplicates."""
-        clean_rera = "".join(filter(str.isalnum, self.rera_number.lower()))
-        if clean_rera and "pending" not in clean_rera and "not" not in clean_rera and "verified" not in clean_rera and len(clean_rera) > 6:
-            return f"rera:{clean_rera}"
-        
+    @staticmethod
+    def is_valid_rera(rera_number: str) -> bool:
+        """
+        True when a RERA string is a real registration ID rather than a
+        placeholder like "Pending", "Not Specified" or "To be verified".
+        """
+        clean = "".join(filter(str.isalnum, (rera_number or "").lower()))
+        if not clean or len(clean) <= 6:
+            return False
+        return not any(token in clean for token in ("pending", "not", "verified"))
+
+    def rera_key(self) -> str:
+        """Identity key based on the RERA registration, or "" when there isn't a real one."""
+        if not self.is_valid_rera(self.rera_number):
+            return ""
+        return f"rera:{''.join(filter(str.isalnum, self.rera_number.lower()))}"
+
+    def name_key(self) -> str:
+        """Identity key based on project name + builder, always available."""
         clean_proj = "".join(filter(str.isalnum, self.project_name.lower()))
         clean_builder = "".join(filter(str.isalnum, self.builder_name.lower()))
         return f"name:{clean_proj}|{clean_builder}"
+
+    def identity_keys(self) -> List[str]:
+        """
+        Every key this project can be recognised by. A record carrying a real
+        RERA number is also indexed by name, so the same project discovered
+        twice - once from a portal without a RERA number, once from K-RERA with
+        one - still collapses into a single row.
+        """
+        keys = [self.name_key()]
+        rera = self.rera_key()
+        if rera:
+            keys.insert(0, rera)
+        return keys
+
+    def deduplication_key(self) -> str:
+        """Preferred single key for this project: RERA when real, else name + builder."""
+        return self.rera_key() or self.name_key()
 
     def to_sheet_row(self) -> List[str]:
         return [
