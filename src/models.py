@@ -193,6 +193,45 @@ class RealEstateProject(BaseModel):
         ]
 
     @classmethod
+    def from_sheet_row(cls, row: List[str]) -> "RealEstateProject":
+        """
+        Rebuilds a project from a Bangalore_Projects sheet row, the inverse of
+        to_sheet_row(). Short rows are tolerated - trailing blanks fall back to
+        the field defaults, which is how Sheets returns partially filled rows.
+        """
+        def cell(idx: int) -> str:
+            return row[idx].strip() if len(row) > idx and row[idx] else ""
+
+        defaults = {
+            "zone": "Bangalore",
+            "property_type": "Apartment",
+            "configuration": "N/A",
+            "price_range": "On Request",
+            "status": "Newly Launched",
+            "rera_number": "Pending / Not Specified",
+            "possession_date": "TBA",
+            "total_units_or_area": "N/A",
+            "source_engine": "AI Search Grounding",
+        }
+        order = [
+            "project_name", "builder_name", "locality", "zone", "property_type",
+            "configuration", "price_range", "status", "rera_number",
+            "possession_date", "total_units_or_area", "key_amenities",
+            "source_url", "source_engine", "first_discovered", "last_updated",
+        ]
+        values = {}
+        for idx, field in enumerate(order):
+            raw = cell(idx)
+            if raw:
+                values[field] = raw
+            elif field in defaults:
+                values[field] = defaults[field]
+        values.setdefault("project_name", "")
+        values.setdefault("builder_name", "")
+        values.setdefault("locality", "")
+        return cls(**values)
+
+    @classmethod
     def sheet_headers(cls) -> List[str]:
         return [
             "Project Name",
